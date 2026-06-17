@@ -892,21 +892,21 @@ grep -- '--enable-wait-event-timing' config.log</code></pre>
       <pre><code># Baseline cluster (/data/pg-baseline, port 5440)
 port = 5440
 max_connections = 300
-fsync = off
 max_wal_size = 8GB
-track_activities = on
-compute_query_id = on
+track_activities = on      # required for query attribution in trace mode
+compute_query_id = on      # required for query attribution in trace mode
 # shared_buffers set per-workload at runtime (sed replacement in run_bench.sh)
+# fsync left at default (on) — workload is SELECT-only, no writes
 
 # Wet cluster (/data/pg-wet, port 5441)
 port = 5441
 max_connections = 300
-fsync = off
 max_wal_size = 8GB
-track_activities = on
-compute_query_id = on
+track_activities = on      # required for query attribution in trace mode
+compute_query_id = on      # required for query attribution in trace mode
 wait_event_capture = off   # changed to stats/trace per-run by run_bench.sh
-# shared_buffers set per-workload at runtime</code></pre>
+# shared_buffers set per-workload at runtime
+# fsync left at default (on) — workload is SELECT-only, no writes</code></pre>
     </section>
 
     <!-- 9. Results -->
