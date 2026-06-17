@@ -1,0 +1,1064 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>wait_event_timing — Benchmark &amp; Testing Design Brief</title>
+<style>
+  :root {
+    --bg: #ffffff;
+    --surface: #f8f9fa;
+    --border: #e1e4e8;
+    --text: #24292e;
+    --text-muted: #586069;
+    --accent: #0366d6;
+    --accent-light: #f1f8ff;
+    --warn: #e36209;
+    --warn-bg: #fff8f0;
+    --code-bg: #f6f8fa;
+    --code-border: #e1e4e8;
+    --green: #22863a;
+    --green-bg: #f0fff4;
+    --heading-border: #e1e4e8;
+    --toc-width: 240px;
+    --max-width: 880px;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0d1117;
+      --surface: #161b22;
+      --border: #30363d;
+      --text: #c9d1d9;
+      --text-muted: #8b949e;
+      --accent: #58a6ff;
+      --accent-light: #0d1117;
+      --warn: #f0883e;
+      --warn-bg: #1c1007;
+      --code-bg: #161b22;
+      --code-border: #30363d;
+      --green: #3fb950;
+      --green-bg: #0d1117;
+      --heading-border: #30363d;
+    }
+  }
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html { scroll-behavior: smooth; font-size: 16px; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.65;
+  }
+
+  /* ── Layout ── */
+
+  .layout {
+    display: flex;
+    max-width: calc(var(--max-width) + var(--toc-width) + 48px);
+    margin: 0 auto;
+    padding: 0 24px;
+  }
+
+  nav.toc {
+    position: sticky;
+    top: 24px;
+    align-self: flex-start;
+    width: var(--toc-width);
+    min-width: var(--toc-width);
+    padding-right: 32px;
+    padding-top: 8px;
+    max-height: calc(100vh - 48px);
+    overflow-y: auto;
+    flex-shrink: 0;
+  }
+
+  nav.toc .toc-title {
+    font-size: 0.7rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    margin-bottom: 10px;
+  }
+
+  nav.toc ol {
+    list-style: none;
+    padding: 0;
+  }
+
+  nav.toc li { margin: 2px 0; }
+
+  nav.toc a {
+    display: block;
+    font-size: 0.8rem;
+    line-height: 1.4;
+    color: var(--text-muted);
+    text-decoration: none;
+    padding: 3px 8px;
+    border-left: 2px solid transparent;
+    border-radius: 0 4px 4px 0;
+    transition: color 0.15s, border-color 0.15s, background 0.15s;
+  }
+
+  nav.toc a:hover {
+    color: var(--accent);
+    border-left-color: var(--accent);
+    background: var(--accent-light);
+  }
+
+  nav.toc li.active > a {
+    color: var(--accent);
+    border-left-color: var(--accent);
+    background: var(--accent-light);
+    font-weight: 600;
+  }
+
+  nav.toc ol ol { padding-left: 12px; }
+
+  main {
+    flex: 1;
+    min-width: 0;
+    max-width: var(--max-width);
+    padding: 40px 0 80px;
+  }
+
+  /* ── Header ── */
+
+  header {
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 28px;
+    margin-bottom: 36px;
+  }
+
+  header .label {
+    display: inline-block;
+    font-size: 0.7rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 2px 8px;
+    margin-bottom: 14px;
+  }
+
+  header h1 {
+    font-size: 2rem;
+    font-weight: 700;
+    line-height: 1.2;
+    letter-spacing: -0.02em;
+    color: var(--text);
+    margin-bottom: 10px;
+  }
+
+  header .subtitle {
+    font-size: 0.95rem;
+    color: var(--text-muted);
+    margin-bottom: 14px;
+  }
+
+  header .meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 18px;
+    font-size: 0.8rem;
+    color: var(--text-muted);
+  }
+
+  header .meta a { color: var(--accent); text-decoration: none; }
+  header .meta a:hover { text-decoration: underline; }
+
+  /* ── Sections ── */
+
+  section { margin-bottom: 48px; }
+
+  h2 {
+    font-size: 1.35rem;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--heading-border);
+    margin-bottom: 18px;
+    margin-top: 12px;
+    scroll-margin-top: 16px;
+  }
+
+  h3 {
+    font-size: 1.05rem;
+    font-weight: 600;
+    margin-top: 22px;
+    margin-bottom: 10px;
+    scroll-margin-top: 16px;
+  }
+
+  p { margin-bottom: 12px; }
+  p:last-child { margin-bottom: 0; }
+
+  /* ── Code ── */
+
+  code {
+    font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+    font-size: 0.85em;
+    background: var(--code-bg);
+    border: 1px solid var(--code-border);
+    border-radius: 4px;
+    padding: 1px 5px;
+  }
+
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--code-border);
+    border-radius: 6px;
+    padding: 14px 16px;
+    overflow-x: auto;
+    margin: 14px 0;
+  }
+
+  pre code {
+    background: none;
+    border: none;
+    padding: 0;
+    font-size: 0.82rem;
+    line-height: 1.55;
+  }
+
+  /* ── Lists ── */
+
+  ul, ol {
+    padding-left: 1.4em;
+    margin-bottom: 12px;
+  }
+
+  li { margin-bottom: 5px; }
+
+  /* ── Tables ── */
+
+  .table-wrap { overflow-x: auto; margin: 14px 0; }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.88rem;
+  }
+
+  th {
+    background: var(--surface);
+    text-align: left;
+    padding: 8px 12px;
+    font-weight: 600;
+    border: 1px solid var(--border);
+    font-size: 0.8rem;
+    letter-spacing: 0.02em;
+    white-space: nowrap;
+  }
+
+  td {
+    padding: 7px 12px;
+    border: 1px solid var(--border);
+    vertical-align: top;
+  }
+
+  tr:nth-child(even) td { background: var(--surface); }
+
+  /* ── Callout boxes ── */
+
+  .callout {
+    border-left: 3px solid var(--accent);
+    background: var(--accent-light);
+    border-radius: 0 6px 6px 0;
+    padding: 12px 16px;
+    margin: 16px 0;
+    font-size: 0.9rem;
+  }
+
+  .callout.warn {
+    border-left-color: var(--warn);
+    background: var(--warn-bg);
+  }
+
+  .callout.warn .callout-title {
+    color: var(--warn);
+  }
+
+  .callout.ok {
+    border-left-color: var(--green);
+    background: var(--green-bg);
+  }
+
+  .callout.ok .callout-title {
+    color: var(--green);
+  }
+
+  .callout-title {
+    font-weight: 700;
+    font-size: 0.78rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    margin-bottom: 4px;
+    color: var(--accent);
+  }
+
+  /* ── Ladder ── */
+
+  .ladder {
+    list-style: none;
+    padding: 0;
+    margin: 14px 0;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    overflow: hidden;
+  }
+
+  .ladder li {
+    display: flex;
+    align-items: baseline;
+    gap: 14px;
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--border);
+    margin: 0;
+    font-size: 0.88rem;
+  }
+
+  .ladder li:last-child { border-bottom: none; }
+
+  .ladder .rung {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    background: var(--accent);
+    color: #fff;
+    font-size: 0.72rem;
+    font-weight: 700;
+    flex-shrink: 0;
+  }
+
+  .ladder .delta {
+    margin-left: auto;
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    white-space: nowrap;
+    font-family: 'SFMono-Regular', Consolas, monospace;
+  }
+
+  /* ── Results placeholder ── */
+
+  .results-note {
+    font-size: 0.85rem;
+    color: var(--text-muted);
+    font-style: italic;
+    margin-top: 8px;
+  }
+
+  /* ── Footer ── */
+
+  footer {
+    border-top: 1px solid var(--border);
+    padding: 20px 0 0;
+    font-size: 0.78rem;
+    color: var(--text-muted);
+  }
+
+  /* ── Responsive ── */
+
+  @media (max-width: 820px) {
+    nav.toc { display: none; }
+    .layout { padding: 0 16px; }
+    main { padding: 24px 0 60px; }
+    header h1 { font-size: 1.55rem; }
+  }
+</style>
+</head>
+<body>
+
+<div class="layout">
+
+  <!-- Sticky TOC -->
+  <nav class="toc" aria-label="Table of contents">
+    <div class="toc-title">Contents</div>
+    <ol id="toc-list">
+      <li><a href="#feature">1. Feature under test</a></li>
+      <li><a href="#cost-concepts">2. Two cost concepts</a></li>
+      <li><a href="#ladder">3. Measurement ladder</a></li>
+      <li><a href="#validity-gate">4. Validity gate</a></li>
+      <li><a href="#workloads">5. Workloads</a></li>
+      <li><a href="#load-modes">6. Load modes</a></li>
+      <li><a href="#run-discipline">7. Run discipline</a></li>
+      <li><a href="#hardware">8. Hardware &amp; build</a></li>
+      <li><a href="#results">9. Results</a></li>
+      <li><a href="#open-questions">Open questions</a></li>
+    </ol>
+  </nav>
+
+  <!-- Main content -->
+  <main>
+
+    <header>
+      <div class="label">Design Brief</div>
+      <h1>wait_event_timing<br>Benchmark &amp; Testing Design</h1>
+      <p class="subtitle">
+        Methodology for benchmarking Dmitry Fomin's Oracle-style wait-event instrumentation patch series.
+      </p>
+      <div class="meta">
+        <span>PR: <a href="https://github.com/DmitryNFomin/postgres/pull/2" target="_blank" rel="noopener">DmitryNFomin/postgres #2</a></span>
+        <span>Session: Hacking Postgres, 2026-06-17</span>
+        <span>Branch: <code>wet-series</code> (base <code>89eafad297a</code>, HEAD <code>983f0ec</code>)</span>
+        <span>Status: benchmark in progress</span>
+      </div>
+    </header>
+
+    <!-- 1. Feature under test -->
+    <section id="feature">
+      <h2>1. Feature under test</h2>
+
+      <p>
+        <code>wait_event_timing</code> (WET) brings Oracle-style wait-event instrumentation to
+        PostgreSQL. Each time a backend enters or exits a wait event, a small record is written.
+        Aggregates and per-session traces are exposed through new catalog views and functions.
+      </p>
+
+      <h3>Patch series</h3>
+      <p>
+        7 reviewable patches in PR <a href="https://github.com/DmitryNFomin/postgres/pull/2" target="_blank" rel="noopener">DmitryNFomin/postgres #2</a>.
+        The series applies cleanly onto upstream master (<code>89eafad297a</code>);
+        series HEAD is <code>983f0ec</code> on branch <code>wet-series</code>.
+      </p>
+
+      <h3>Capture levels</h3>
+      <p>Controlled by the GUC <code>wait_event_capture</code>:</p>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Level</th>
+              <th>What is recorded</th>
+              <th>Storage</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>off</code></td>
+              <td>Nothing — feature compiled in but dormant.</td>
+              <td>—</td>
+            </tr>
+            <tr>
+              <td><code>stats</code></td>
+              <td>Per-(backend, event) count, total duration, max duration, plus a 32-bucket log₂ histogram of individual wait durations.</td>
+              <td>Shared memory (one slot per backend per event type).</td>
+            </tr>
+            <tr>
+              <td><code>trace</code></td>
+              <td>Everything in <code>stats</code>, plus a per-session DSA ring buffer of individual wait entries. Query-attribution markers (<code>ExecStart</code>/<code>ExecEnd</code>, <code>QueryStart</code>/<code>QueryEnd</code>) are interleaved to correlate waits with SQL statements.</td>
+              <td>DSA ring (per session) + shared memory aggregates.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>Compile-time gate</h3>
+      <p>
+        The feature is guarded by a compile-time flag:
+      </p>
+      <pre><code># meson (preferred)
+meson setup build -Dwait_event_timing=true ...
+
+# autoconf equivalent
+./configure --enable-wait-event-timing ...</code></pre>
+      <p>
+        Without the flag the instrumentation points are <code>#ifdef</code>'d out entirely.
+        <strong>With</strong> the flag but <code>wait_event_capture=off</code>,
+        the GUC is present and the code paths compile in, but no data is written at runtime.
+      </p>
+
+      <h3>Key new catalog objects</h3>
+      <ul>
+        <li><code>pg_stat_wait_event_timing</code> — view exposing per-(backend, event) aggregates.</li>
+        <li>DSA-backed ring functions for trace retrieval.</li>
+      </ul>
+    </section>
+
+    <!-- 2. Cost concepts -->
+    <section id="cost-concepts">
+      <h2>2. Two cost concepts (keep them distinct)</h2>
+
+      <p>
+        Conflating these is the most common mistake in instrumentation benchmarks.
+        They must be measured and reported separately.
+      </p>
+
+      <h3>Static / baseline overhead</h3>
+      <p>
+        The constant cost of having the feature <em>compiled in and/or enabled</em>,
+        independent of whether anyone reads or resets the data.
+        Sources include:
+      </p>
+      <ul>
+        <li>Branch prediction misses on the inline <code>#ifdef</code>/<code>if (capture_level)</code> gate in every backend loop.</li>
+        <li>Additional shared-memory footprint touching more cache lines.</li>
+        <li>Per-wait-event entry writes into shared-memory aggregates or DSA ring under <code>stats</code>/<code>trace</code>.</li>
+      </ul>
+      <p>
+        This is measured by comparing TPS/latency across the measurement ladder rungs
+        (see Section 3) at a <em>fixed, low observer frequency</em> (or zero reads from outside).
+      </p>
+
+      <h3>Observer effect</h3>
+      <p>
+        The dynamic measurement error introduced by the act of monitoring itself.
+        It grows with:
+      </p>
+      <ul>
+        <li><strong>Sampling/probing frequency</strong> — how often an external agent reads the views.</li>
+        <li><strong>Reset operations</strong> — clearing the stats table (e.g., calling the reset function analogous to <code>pg_stat_reset()</code>) under load acquires a lock on the shared hash table; every backend that tries to re-register a wait event must contend for that lock. Higher reset frequency &Rarr; worse observer effect.</li>
+      </ul>
+      <div class="callout warn">
+        <div class="callout-title">Analogy — pg_stat_statements under load</div>
+        Resetting <code>pg_stat_statements</code> under a heavy write workload is not free: clearing
+        the shared hash forces every backend that next executes a query to re-register its entry,
+        all contending on the same spinlock/LWLock. The same dynamic applies to
+        <code>wait_event_timing</code> stats. A benchmark that resets stats frequently will
+        inflate overhead numbers beyond what a typical production observer would see.
+      </div>
+      <p>
+        The observer-effect microbenchmark (a future pass) will sweep read/reset frequency
+        as an independent variable while holding workload constant.
+      </p>
+    </section>
+
+    <!-- 3. Measurement ladder -->
+    <section id="ladder">
+      <h2>3. Measurement ladder</h2>
+      <p>
+        Each rung isolates one additional source of cost. Deltas between consecutive rungs
+        attribute cost to specific causes. All rungs run on the same hardware against the same
+        workload within the same benchmark session (interleaved rounds — see Section 7).
+      </p>
+
+      <ol class="ladder">
+        <li>
+          <span class="rung">1</span>
+          <div>
+            <strong>Vanilla Postgres</strong> (upstream master, no patch applied) —
+            the true baseline. Every other rung is compared to this.
+          </div>
+          <span class="delta">Δ = reference</span>
+        </li>
+        <li>
+          <span class="rung">2</span>
+          <div>
+            <strong>Patched, compiled <em>without</em> <code>--enable-wait-event-timing</code></strong>
+            (stub build) — the patch is applied but all instrumentation is
+            <code>#ifdef</code>'d out. Should be statistically indistinguishable from rung 1.
+            Any delta here reveals a source-code-change cost
+            (e.g., changed hot-path data structures, new function calls outside the guard).
+          </div>
+          <span class="delta">Δ(1→2) source-change cost</span>
+        </li>
+        <li>
+          <span class="rung">3</span>
+          <div>
+            <strong>Patched + compiled <em>with</em> flag, <code>capture=off</code></strong> —
+            the feature is compiled in and the GUC is present, but no wait events are recorded.
+            Delta over rung 2 is the cost of the compiled-in inline gate
+            (branch, possible cache-line touch).
+          </div>
+          <span class="delta">Δ(2→3) compiled-in gate cost</span>
+        </li>
+        <li>
+          <span class="rung">4</span>
+          <div>
+            <strong><code>capture=stats</code></strong> —
+            per-backend shared-memory aggregates are maintained (counts, durations, histogram buckets
+            updated on every wait-event transition).
+          </div>
+          <span class="delta">Δ(3→4) stats capture cost</span>
+        </li>
+        <li>
+          <span class="rung">5</span>
+          <div>
+            <strong><code>capture=trace</code></strong> —
+            DSA ring writes per event plus query-attribution markers.
+            Heaviest mode.
+          </div>
+          <span class="delta">Δ(4→5) trace capture cost</span>
+        </li>
+      </ol>
+
+      <p>
+        A further axis — <strong>observer read/reset frequency</strong> — is orthogonal to the rungs
+        and will be swept separately in the observer-effect microbenchmark.
+      </p>
+    </section>
+
+    <!-- 4. Validity gate -->
+    <section id="validity-gate">
+      <h2>4. Validity gate</h2>
+
+      <div class="callout warn">
+        <div class="callout-title">Critical: verify the feature is genuinely active</div>
+        A build configured <em>without</em> <code>--enable-wait-event-timing</code> still exposes
+        the <code>wait_event_capture</code> GUC, but silently downgrades any non-<code>off</code>
+        value back to <code>off</code>. If this is not caught, a benchmark comparing
+        <code>off</code>, <code>stats</code>, and <code>trace</code> against the un-instrumented
+        build will produce a <em>false ~0% overhead</em> — all three levels are actually identical.
+      </div>
+
+      <h3>Mandatory pre-benchmark check</h3>
+      <p>
+        Before accepting any numbers from a build, run this gate. Failure means the build is
+        mis-configured and the run must be discarded.
+      </p>
+      <pre><code>-- Connect to the server under test, then:
+SET wait_event_capture = 'stats';
+SELECT current_setting('wait_event_capture');
+-- Must return: stats
+-- (returns 'off' on a stub/non-instrumented build => FAIL)
+
+SET wait_event_capture = 'trace';
+SELECT current_setting('wait_event_capture');
+-- Must return: trace
+
+-- The view must exist:
+\d pg_stat_wait_event_timing
+-- Must describe the view (not "relation does not exist") => PASS</code></pre>
+
+      <div class="callout ok">
+        <div class="callout-title">Gate passed</div>
+        All three checks succeed &Rarr; the build is genuinely instrumented.
+        Proceed with the benchmark.
+      </div>
+
+      <h3>Lesson</h3>
+      <p>
+        Any instrumentation benchmark must assert that the feature is active, not merely
+        that the GUC is settable. A GUC that silently no-ops is a common footgun in
+        compile-gated features.
+      </p>
+    </section>
+
+    <!-- 5. Workloads -->
+    <section id="workloads">
+      <h2>5. Workloads</h2>
+
+      <p>
+        Workloads are chosen so that the feature's per-event cost is actually exercised.
+        The key question for each workload is: <em>what is the bottleneck, and how many
+        wait-event transitions occur per second?</em>
+      </p>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Description</th>
+              <th>pgbench params</th>
+              <th>Bottleneck / wait profile</th>
+              <th>What it measures</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>W1</strong></td>
+              <td>Read-only, fully cached</td>
+              <td><code>pgbench -S</code>, scale 100, large <code>shared_buffers</code> (fits all data)</td>
+              <td>CPU-bound; very few waits per transaction.</td>
+              <td>Pure inline-gate cost — waits rarely fire, so this isolates the constant overhead of the code path itself.</td>
+            </tr>
+            <tr>
+              <td><strong>W2</strong></td>
+              <td>Wait-saturated <em>(key test)</em></td>
+              <td><code>pgbench -S</code> or default, scale 400, <code>shared_buffers=256MB</code>, high client count</td>
+              <td>Constant buffer-mapping / I/O / LWLock waits. Working set &gg; SB.</td>
+              <td>Maximum wait-event transition rate. This is where the per-event cost of <code>stats</code>/<code>trace</code> is most visible. <strong>Proof obligation:</strong> dump top wait events + total wait-event count; confirm wait-bound (not CPU-bound) via <code>mpstat</code>.</td>
+            </tr>
+            <tr>
+              <td><strong>W3</strong></td>
+              <td>TPC-B read-write</td>
+              <td><code>pgbench</code> default (TPC-B-like), scale 100, mixed client count</td>
+              <td>WAL writes, relation locks, <code>ClientRead</code> waits.</td>
+              <td>Production-representative mix including WAL and lock-wait events.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>W2 proof obligation</h3>
+      <p>
+        Before trusting W2 numbers, collect evidence that the workload is genuinely wait-bound:
+      </p>
+      <pre><code>-- Top wait events during W2 (run while benchmark is active):
+SELECT wait_event_type, wait_event,
+       sum(count) AS total_count,
+       sum(total_us) / 1e6 AS total_sec
+FROM pg_stat_wait_event_timing
+GROUP BY 1, 2
+ORDER BY total_count DESC
+LIMIT 20;
+
+-- Confirm CPU is not maxed out:
+mpstat -P ALL 1 5</code></pre>
+      <p>
+        If <code>mpstat</code> shows CPU at 100% user and wait counts are low, the workload is
+        CPU-bound and W2 is not exercising the feature — adjust <code>shared_buffers</code>
+        or scale until waits dominate.
+      </p>
+    </section>
+
+    <!-- 6. Load modes -->
+    <section id="load-modes">
+      <h2>6. Load modes</h2>
+
+      <p>Two complementary perspectives on overhead — both are required for a complete picture.</p>
+
+      <h3>Stress mode (100% capacity, max TPS)</h3>
+      <p>
+        Run pgbench at maximum concurrency the system can sustain. The system is bottlenecked
+        by the limiting resource (CPU or I/O). Metric: <strong>TPS</strong>.
+      </p>
+      <p>
+        Caveat: if the bottleneck is CPU and the feature adds CPU work, the overhead is visible
+        as reduced TPS. If the bottleneck is I/O, the feature's CPU cost may hide behind I/O
+        wait — overhead can appear lower than it really is.
+      </p>
+
+      <h3>Rate-limited mode (~50% capacity, latency-focused)</h3>
+      <p>
+        Use <code>pgbench --rate</code> to set TPS at roughly half the system's max capacity.
+        The system is not saturated, so the feature's per-call cost shows up as
+        <em>added latency per transaction</em> rather than reduced throughput.
+        Metric: <strong>p95 / p99 latency</strong>.
+      </p>
+      <p>
+        This mode is more production-realistic (most production systems run well below saturation)
+        and avoids the masking effect described above.
+      </p>
+      <div class="callout">
+        <div class="callout-title">Single-box caveat</div>
+        When pgbench and Postgres run on the same machine, pgbench itself consumes CPU.
+        At 100% capacity the benchmark tool competes with the server. Rate-limited mode
+        reduces this contention and produces cleaner latency measurements.
+      </div>
+    </section>
+
+    <!-- 7. Run discipline -->
+    <section id="run-discipline">
+      <h2>7. Run discipline</h2>
+
+      <h3>Interleaving (cancels temporal drift)</h3>
+      <p>
+        Within each round, cycle through all rungs in sequence before moving to the next round.
+        Do not run all trials for rung 1 then all for rung 2, etc. — drift (thermal, memory
+        pressure, OS background tasks) will bias inter-rung comparisons.
+      </p>
+      <pre><code>for round in 1 2 3 4 5; do
+  for rung in vanilla stub off stats trace; do
+    pgbench ... --log --progress 10 -T 60 >> bench.log
+  done
+done</code></pre>
+
+      <h3>Run parameters</h3>
+      <ul>
+        <li>Duration: <strong>60 seconds per run</strong>.</li>
+        <li>Rounds: <strong>5 rounds</strong> per (workload × mode × rung).</li>
+        <li>Warmup: discard round 1; report on rounds 2–5.</li>
+        <li>Summary statistics: <strong>median TPS</strong>, <strong>p95 latency</strong>, <strong>p99 latency</strong>.</li>
+      </ul>
+
+      <h3>Between-run resets</h3>
+      <p>
+        To isolate static overhead from observer effect, do <em>not</em> reset
+        <code>pg_stat_wait_event_timing</code> between runs during the primary benchmark.
+        A separate reset-sweep pass will quantify the observer effect independently.
+      </p>
+    </section>
+
+    <!-- 8. Hardware & build -->
+    <section id="hardware">
+      <h2>8. Hardware &amp; build</h2>
+
+      <h3>Hardware</h3>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Parameter</th><th>Value</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Provider</td><td>Hetzner Cloud</td></tr>
+            <tr><td>Instance type</td><td>CCX43</td></tr>
+            <tr><td>CPU</td><td>AMD EPYC Milan, 16 dedicated vCPU</td></tr>
+            <tr><td>RAM</td><td>64 GB</td></tr>
+            <tr><td>OS</td><td>Ubuntu 24.04 LTS</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>Build</h3>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Parameter</th><th>Value</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Compiler</td><td>gcc, <code>-O2</code></td></tr>
+            <tr><td>Build system</td><td>meson</td></tr>
+            <tr><td>Upstream base</td><td><code>89eafad297a</code> (master)</td></tr>
+            <tr><td>Patch branch</td><td><code>wet-series</code></td></tr>
+            <tr><td>Series HEAD</td><td><code>983f0ec</code></td></tr>
+            <tr><td>Instrumented flag</td><td><code>-Dwait_event_timing=true</code> (rungs 3–5); omitted for rung 2</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>Build commands</h3>
+      <pre><code># Rung 2: stub build (flag absent)
+meson setup build-stub  --prefix=/usr/local/pg-stub  \
+  -Dbuildtype=release -Dc_args='-O2' ...
+ninja -C build-stub install
+
+# Rungs 3-5: instrumented build
+meson setup build-wet   --prefix=/usr/local/pg-wet   \
+  -Dbuildtype=release -Dc_args='-O2' \
+  -Dwait_event_timing=true ...
+ninja -C build-wet install</code></pre>
+    </section>
+
+    <!-- 9. Results -->
+    <section id="results">
+      <h2>9. Results <small style="font-size:0.7em; font-weight:400; color:var(--text-muted)">(populated on completion)</small></h2>
+
+      <div class="callout warn">
+        <div class="callout-title">Work in progress</div>
+        Numbers below are filled from <code>/root/bench.log</code> when the benchmark run finishes.
+        Do not treat any cell as final until the run completes and the validity gate (Section 4)
+        has been passed for each build.
+      </div>
+
+      <h3>W1 — Read-only cached (stress mode)</h3>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Rung</th>
+              <th>Median TPS</th>
+              <th>p95 lat (ms)</th>
+              <th>p99 lat (ms)</th>
+              <th>%Δ vs baseline</th>
+              <th>%Δ vs off</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td>1 — vanilla</td><td>—</td><td>—</td><td>—</td><td>reference</td><td>—</td></tr>
+            <tr><td>2 — stub</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
+            <tr><td>3 — off</td><td>—</td><td>—</td><td>—</td><td>—</td><td>reference</td></tr>
+            <tr><td>4 — stats</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
+            <tr><td>5 — trace</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>W1 — Read-only cached (rate-limited, ~50% capacity)</h3>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Rung</th>
+              <th>Median TPS</th>
+              <th>p95 lat (ms)</th>
+              <th>p99 lat (ms)</th>
+              <th>%Δ vs baseline</th>
+              <th>%Δ vs off</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td>1 — vanilla</td><td>—</td><td>—</td><td>—</td><td>reference</td><td>—</td></tr>
+            <tr><td>2 — stub</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
+            <tr><td>3 — off</td><td>—</td><td>—</td><td>—</td><td>—</td><td>reference</td></tr>
+            <tr><td>4 — stats</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
+            <tr><td>5 — trace</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>W2 — Wait-saturated (stress mode)</h3>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Rung</th>
+              <th>Median TPS</th>
+              <th>p95 lat (ms)</th>
+              <th>p99 lat (ms)</th>
+              <th>%Δ vs baseline</th>
+              <th>%Δ vs off</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td>1 — vanilla</td><td>—</td><td>—</td><td>—</td><td>reference</td><td>—</td></tr>
+            <tr><td>2 — stub</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
+            <tr><td>3 — off</td><td>—</td><td>—</td><td>—</td><td>—</td><td>reference</td></tr>
+            <tr><td>4 — stats</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
+            <tr><td>5 — trace</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>W2 — Wait-saturated (rate-limited, ~50% capacity)</h3>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Rung</th>
+              <th>Median TPS</th>
+              <th>p95 lat (ms)</th>
+              <th>p99 lat (ms)</th>
+              <th>%Δ vs baseline</th>
+              <th>%Δ vs off</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td>1 — vanilla</td><td>—</td><td>—</td><td>—</td><td>reference</td><td>—</td></tr>
+            <tr><td>2 — stub</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
+            <tr><td>3 — off</td><td>—</td><td>—</td><td>—</td><td>—</td><td>reference</td></tr>
+            <tr><td>4 — stats</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
+            <tr><td>5 — trace</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>W3 — TPC-B read-write (stress mode)</h3>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Rung</th>
+              <th>Median TPS</th>
+              <th>p95 lat (ms)</th>
+              <th>p99 lat (ms)</th>
+              <th>%Δ vs baseline</th>
+              <th>%Δ vs off</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td>1 — vanilla</td><td>—</td><td>—</td><td>—</td><td>reference</td><td>—</td></tr>
+            <tr><td>2 — stub</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
+            <tr><td>3 — off</td><td>—</td><td>—</td><td>—</td><td>—</td><td>reference</td></tr>
+            <tr><td>4 — stats</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
+            <tr><td>5 — trace</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>W3 — TPC-B read-write (rate-limited, ~50% capacity)</h3>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Rung</th>
+              <th>Median TPS</th>
+              <th>p95 lat (ms)</th>
+              <th>p99 lat (ms)</th>
+              <th>%Δ vs baseline</th>
+              <th>%Δ vs off</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td>1 — vanilla</td><td>—</td><td>—</td><td>—</td><td>reference</td><td>—</td></tr>
+            <tr><td>2 — stub</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
+            <tr><td>3 — off</td><td>—</td><td>—</td><td>—</td><td>—</td><td>reference</td></tr>
+            <tr><td>4 — stats</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
+            <tr><td>5 — trace</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <p class="results-note">
+        Source: <code>/root/bench.log</code> on the CCX43 benchmark host.
+        Results will be posted to the PR thread once all runs complete.
+      </p>
+    </section>
+
+    <!-- Open questions -->
+    <section id="open-questions">
+      <h2>Open questions / next steps</h2>
+      <ul>
+        <li>
+          <strong>Stub-build rung (rung 2)</strong> — confirm the patched binary without
+          <code>-Dwait_event_timing=true</code> is genuinely equivalent to vanilla.
+          We expect ~0% delta; any non-trivial delta warrants investigation of hot-path
+          structural changes in the patch.
+        </li>
+        <li>
+          <strong>50%-capacity latency pass</strong> — rate-limited mode is not yet run.
+          This is required to characterize latency overhead in production-like conditions
+          (see Section 6).
+        </li>
+        <li>
+          <strong>Reset/observer-effect microbenchmark</strong> — sweep reset frequency
+          (0, 1/s, 10/s) as an independent variable while holding workload at W2 stress.
+          This isolates the observer effect from static overhead and quantifies the cost
+          of high-frequency monitoring scripts.
+        </li>
+        <li>
+          <strong>Option naming review</strong> — the GUC name <code>wait_event_capture</code>
+          and level names <code>stats</code>/<code>trace</code> should be reviewed against
+          PostgreSQL GUC naming conventions and community feedback before the patch is
+          submitted to the commitfest.
+        </li>
+        <li>
+          <strong>DSA ring sizing</strong> — what happens when the trace ring overflows
+          under very high wait-event rates? Is the overflow behavior clearly documented
+          and tested?
+        </li>
+      </ul>
+    </section>
+
+    <footer>
+      <p>
+        Prepared during a Hacking Postgres session, 2026-06-17.
+        PR: <a href="https://github.com/DmitryNFomin/postgres/pull/2">DmitryNFomin/postgres #2</a>.
+        This document does not represent the PostgreSQL Global Development Group.
+      </p>
+    </footer>
+
+  </main>
+</div>
+
+<script>
+  // Highlight active TOC entry on scroll
+  (function () {
+    const sections = document.querySelectorAll('section[id], header');
+    const tocLinks = document.querySelectorAll('nav.toc a');
+
+    function onScroll() {
+      let current = '';
+      sections.forEach(s => {
+        const top = s.getBoundingClientRect().top;
+        if (top <= 80) current = s.id || '';
+      });
+      tocLinks.forEach(a => {
+        const li = a.parentElement;
+        const href = a.getAttribute('href');
+        if (href === '#' + current) {
+          li.classList.add('active');
+        } else {
+          li.classList.remove('active');
+        }
+      });
+    }
+
+    window.addEventListener('scroll', onScroll, { passive: true });
+    onScroll();
+  })();
+</script>
+
+</body>
+</html>
