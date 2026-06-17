@@ -695,8 +695,8 @@ su - pgbench -c "$WET/psql -p 5441 -d postgres -tAc \
               <td><strong>W3</strong></td>
               <td>Latency at 50% capacity</td>
               <td><code>pgbench -S -c 16 -j 16 -T 180 -P 15 -r -n -R &lt;rate&gt;</code><br>Same setup as W2 (scale 400, <code>shared_buffers=256MB</code>)<br><code>rate</code> = 50% of W2 baseline median TPS</td>
-              <td>Same wait-heavy environment as W2 but server not saturated — overhead surfaces as added latency per call, not TPS drop. Production-realistic load level.</td>
-              <td><strong>Latency</strong> (avg, p95, p99). Avoids pgbench co-location CPU contention at full saturation. Rate derived from W2 results.</td>
+              <td>Regular load-testing (~50% capacity, <strong>not stress-testing</strong>) in the same wait-heavy environment as W2. Server is not saturated — overhead surfaces as added latency per call rather than TPS drop. Production-realistic load level.</td>
+              <td><strong>Latency</strong> (avg, p95, p99). CPU-headroom check (vmstat idle%) required to confirm the server is genuinely at 50% capacity. Rate derived from W2 results.</td>
             </tr>
           </tbody>
         </table>
@@ -1187,32 +1187,41 @@ wait   # let pgbench finish
       <h2>Open questions / next steps</h2>
       <ul>
         <li>
-          <strong>Stub-build rung (rung 2)</strong> — confirm the patched binary without
-          <code>-Dwait_event_timing=true</code> is genuinely equivalent to vanilla.
-          We expect ~0% delta; any non-trivial delta warrants investigation of hot-path
-          structural changes in the patch.
+          <strong>Stub-build rung (rung 2)</strong> — the patched binary compiled
+          <em>without</em> <code>--enable-wait-event-timing</code> is not yet built.
+          Expected delta vs vanilla: ~0%; any non-trivial delta would reveal a hot-path
+          structural change in the patch outside the compile guard.
         </li>
         <li>
-          <strong>W3 rate derivation</strong> — the <code>-R</code> value for W3 is computed
-          after W2 stress runs complete (50% of W2 baseline median TPS). Confirm the server
-          is not saturated at that rate (CPU idle &gt; 30%) before accepting W3 latency numbers.
+          <strong>W3 CPU-headroom check</strong> — sample CPU (vmstat idle%) during the
+          rate-limited W3 run to confirm the server is genuinely not saturated.
+          This proves W3 is regular load-testing at 50% capacity, distinct from W2 stress.
         </li>
         <li>
           <strong>Reset/observer-effect microbenchmark</strong> — sweep reset frequency
-          (0, 1/s, 10/s) as an independent variable while holding workload at W2 stress.
-          This isolates the observer effect from static overhead and quantifies the cost
-          of high-frequency monitoring scripts.
+          (0, 1/s, 10/s) as an independent variable while holding the W2 stress workload
+          constant. Isolates observer-effect cost (locking, re-registration) from the static
+          overhead measured in the primary runs.
         </li>
         <li>
-          <strong>Option naming review</strong> — the GUC name <code>wait_event_capture</code>
-          and level names <code>stats</code>/<code>trace</code> should be reviewed against
-          PostgreSQL GUC naming conventions and community feedback before the patch is
-          submitted to the commitfest.
+          <strong>Iteration 2 — pg_stat_statements loaded</strong> — add
+          <code>shared_preload_libraries = 'pg_stat_statements'</code> and
+          <code>CREATE EXTENSION pg_stat_statements</code> on both clusters to introduce
+          realistic shared-hash / LWLock contention (more wait events in flight). Protocol:
+          reset <code>pg_stat_statements</code> before each run; cross-check its
+          <code>calls</code> count (should equal ≈ TPS × 180) to confirm the workload ran
+          as expected; dump top queries alongside the wait-event summary.
+        </li>
+        <li>
+          <strong>W4 (future) — read-side observer effect</strong> — while one pgbench
+          drives the SELECT-only workload, a second client polls
+          <code>pg_stat_wait_event_timing</code> at increasing frequency (0, 1 Hz, 10 Hz).
+          Measures how <em>reading</em> the instrumentation perturbs the workload being
+          measured — the instrumentation creates the problem it is trying to observe.
         </li>
         <li>
           <strong>DSA ring sizing</strong> — what happens when the trace ring overflows
-          under very high wait-event rates? Is the overflow behavior clearly documented
-          and tested?
+          under very high wait-event rates? Is overflow behavior documented and tested?
         </li>
       </ul>
     </section>
