@@ -394,6 +394,7 @@
       <li><a href="#run-discipline">7. Run discipline</a></li>
       <li><a href="#hardware">8. Hardware &amp; build</a></li>
       <li><a href="#results">9. Results</a></li>
+      <li><a href="#exact-commands">10. Exact commands</a></li>
       <li><a href="#open-questions">Open questions</a></li>
     </ol>
   </nav>
@@ -616,19 +617,26 @@ meson setup build -Dwait_event_timing=true ...
         Before accepting any numbers from a build, run this gate. Failure means the build is
         mis-configured and the run must be discarded.
       </p>
-      <pre><code>-- Connect to the server under test, then:
-SET wait_event_capture = 'stats';
-SELECT current_setting('wait_event_capture');
--- Must return: stats
--- (returns 'off' on a stub/non-instrumented build => FAIL)
+      <p>These are the exact commands run by <code>/root/go.sh</code> before every benchmark session:</p>
+      <pre><code># Check 1: stats level must stick
+WET=/opt/pg-wet/bin
+su - pgbench -c "$WET/psql -p 5441 -d postgres -tAc \
+  \"SET wait_event_capture=stats; SELECT current_setting('wait_event_capture');\""
+# Expected output: stats
+# If output is 'off': build is NOT instrumented — ABORT
 
-SET wait_event_capture = 'trace';
-SELECT current_setting('wait_event_capture');
--- Must return: trace
+# Check 2: trace level must stick
+su - pgbench -c "$WET/psql -p 5441 -d postgres -tAc \
+  \"SET wait_event_capture=trace; SELECT current_setting('wait_event_capture');\""
+# Expected output: trace
 
--- The view must exist:
-\d pg_stat_wait_event_timing
--- Must describe the view (not "relation does not exist") => PASS</code></pre>
+# Check 3: the view must exist and be queryable
+su - pgbench -c "$WET/psql -p 5441 -d postgres -tAc \
+  \"SELECT count(*) FROM pg_stat_wait_event_timing;\""
+# Expected output: a number (0 or more) — not an error
+
+# go.sh only proceeds if STATS='stats' AND TRACE='trace'; otherwise it exits 1
+# and writes: "NOT VERIFIED — will NOT produce misleading numbers."</code></pre>
 
       <div class="callout ok">
         <div class="callout-title">Gate passed</div>
@@ -669,23 +677,23 @@ SELECT current_setting('wait_event_capture');
             <tr>
               <td><strong>W1</strong></td>
               <td>Read-only, fully cached</td>
-              <td><code>pgbench -S</code>, scale 100, large <code>shared_buffers</code> (fits all data)</td>
+              <td><code>pgbench -S -c 16 -j 16 -T 60 -n --no-vacuum</code>, scale 100, <code>shared_buffers=8GB</code> (data ~1.6 GB, fits in buffer pool)</td>
               <td>CPU-bound; very few waits per transaction.</td>
               <td>Pure inline-gate cost — waits rarely fire, so this isolates the constant overhead of the code path itself.</td>
             </tr>
             <tr>
               <td><strong>W2</strong></td>
               <td>Wait-saturated <em>(key test)</em></td>
-              <td><code>pgbench -S</code> or default, scale 400, <code>shared_buffers=256MB</code>, high client count</td>
-              <td>Constant buffer-mapping / I/O / LWLock waits. Working set &gg; SB.</td>
-              <td>Maximum wait-event transition rate. This is where the per-event cost of <code>stats</code>/<code>trace</code> is most visible. <strong>Proof obligation:</strong> dump top wait events + total wait-event count; confirm wait-bound (not CPU-bound) via <code>mpstat</code>.</td>
+              <td><code>pgbench -S -c 32 -j 16 -T 60 -n --no-vacuum</code>, scale 400, <code>shared_buffers=256MB</code> (data ~6.4 GB &gg; SB)</td>
+              <td>Constant buffer-mapping / I/O / LWLock waits. Working set far exceeds buffer pool.</td>
+              <td>Maximum wait-event transition rate. This is where the per-event cost of <code>stats</code>/<code>trace</code> is most visible. <strong>Proof obligation:</strong> dump top wait events + total wait-event count; confirm wait-bound (not CPU-bound) via <code>vmstat</code>.</td>
             </tr>
             <tr>
               <td><strong>W3</strong></td>
               <td>TPC-B read-write</td>
-              <td><code>pgbench</code> default (TPC-B-like), scale 100, mixed client count</td>
+              <td><code>pgbench -c 32 -j 16 -T 60 -n --no-vacuum</code> (default TPC-B script), scale 200, <code>shared_buffers=2GB</code></td>
               <td>WAL writes, relation locks, <code>ClientRead</code> waits.</td>
-              <td>Production-representative mix including WAL and lock-wait events.</td>
+              <td>Production-representative mixed read-write with WAL and lock-wait events.</td>
             </tr>
           </tbody>
         </table>
@@ -695,17 +703,27 @@ SELECT current_setting('wait_event_capture');
       <p>
         Before trusting W2 numbers, collect evidence that the workload is genuinely wait-bound:
       </p>
-      <pre><code>-- Top wait events during W2 (run while benchmark is active):
+      <pre><code>-- Top wait events during W2 (run while pgbench is active):
 SELECT wait_event_type, wait_event,
-       sum(count) AS total_count,
-       sum(total_us) / 1e6 AS total_sec
+       sum(count)                        AS total_count,
+       sum(total_wait_time_us) / 1000.0  AS total_wait_ms
 FROM pg_stat_wait_event_timing
-GROUP BY 1, 2
+GROUP BY wait_event_type, wait_event
 ORDER BY total_count DESC
-LIMIT 20;
+LIMIT 10;
 
--- Confirm CPU is not maxed out:
-mpstat -P ALL 1 5</code></pre>
+-- Mid-run snapshot from pg_stat_activity:
+SELECT coalesce(wait_event_type, 'CPU')     AS type,
+       coalesce(wait_event, 'running')       AS event,
+       count(*)
+FROM pg_stat_activity
+WHERE state = 'active'
+GROUP BY 1, 2
+ORDER BY 3 DESC
+LIMIT 8;
+
+-- Confirm CPU is not maxed out (low idle% = wait-bound):
+vmstat 1 5</code></pre>
       <p>
         If <code>mpstat</code> shows CPU at 100% user and wait counts are low, the workload is
         CPU-bound and W2 is not exercising the feature — adjust <code>shared_buffers</code>
@@ -818,17 +836,57 @@ done</code></pre>
         </table>
       </div>
 
-      <h3>Build commands</h3>
-      <pre><code># Rung 2: stub build (flag absent)
-meson setup build-stub  --prefix=/usr/local/pg-stub  \
-  -Dbuildtype=release -Dc_args='-O2' ...
-ninja -C build-stub install
+      <h3>Build commands (actual — autoconf)</h3>
+      <p>
+        The benchmark uses autoconf (<code>./configure</code>), not meson.
+        Two separate installs are maintained side by side.
+      </p>
+      <pre><code># Rung 1: vanilla baseline (upstream master, no patch)
+#   installed at /opt/pg-baseline  port 5440
+./configure --prefix=/opt/pg-baseline CC="ccache gcc" CFLAGS="-O2"
+make -j16
+make install
 
-# Rungs 3-5: instrumented build
-meson setup build-wet   --prefix=/usr/local/pg-wet   \
-  -Dbuildtype=release -Dc_args='-O2' \
-  -Dwait_event_timing=true ...
-ninja -C build-wet install</code></pre>
+# Rung 2: stub build (patch applied, flag ABSENT) — PLANNED, not yet built
+#   same configure line as vanilla but on wet-series branch
+./configure --prefix=/opt/pg-stub CC="ccache gcc" CFLAGS="-O2"
+make -j16
+make install
+
+# Rungs 3-5: instrumented build (patch + flag present)
+#   installed at /opt/pg-wet  port 5441
+#   Source: /root/rebuild_wet.sh
+cd /root/pg-src
+git checkout -f wet-series
+git clean -fdx -q
+./configure --prefix=/opt/pg-wet --enable-wait-event-timing \
+  CC="ccache gcc" CFLAGS="-O2"
+make -j16
+make install
+
+# Sanity check after install: flag must appear in config.log
+grep -- '--enable-wait-event-timing' config.log</code></pre>
+
+      <h3>postgresql.conf settings (both clusters)</h3>
+      <p>Appended by <code>/root/setup_clusters.sh</code> and <code>/root/go.sh</code>:</p>
+      <pre><code># Baseline cluster (/data/pg-baseline, port 5440)
+port = 5440
+max_connections = 300
+fsync = off
+max_wal_size = 8GB
+track_activities = on
+compute_query_id = on
+# shared_buffers set per-workload at runtime (sed replacement in run_bench.sh)
+
+# Wet cluster (/data/pg-wet, port 5441)
+port = 5441
+max_connections = 300
+fsync = off
+max_wal_size = 8GB
+track_activities = on
+compute_query_id = on
+wait_event_capture = off   # changed to stats/trace per-run by run_bench.sh
+# shared_buffers set per-workload at runtime</code></pre>
     </section>
 
     <!-- 9. Results -->
@@ -984,6 +1042,171 @@ ninja -C build-wet install</code></pre>
         Source: <code>/root/bench.log</code> on the CCX43 benchmark host.
         Results will be posted to the PR thread once all runs complete.
       </p>
+    </section>
+
+    <!-- 10. Exact commands per step -->
+    <section id="exact-commands">
+      <h2>10. Exact commands per step</h2>
+
+      <p>
+        These are verbatim invocations extracted from the scripts on the benchmark host
+        (<code>23.88.42.150</code>). Scripts: <code>/root/rebuild_wet.sh</code>,
+        <code>/root/setup_clusters.sh</code>, <code>/root/go.sh</code>,
+        <code>/root/run_bench.sh</code>.
+      </p>
+
+      <h3>Step 0 — Data initialization</h3>
+      <p>Run once per workload tier before the interleaved benchmark rounds.</p>
+      <pre><code>BASELINE_BIN=/opt/pg-baseline/bin
+WET_BIN=/opt/pg-wet/bin
+
+# W1: scale=100 — run with shared_buffers=8GB
+$BASELINE_BIN/pgbench -p 5440 -i -s 100 --no-vacuum postgres
+$WET_BIN/pgbench    -p 5441 -i -s 100 --no-vacuum postgres
+
+# W2: scale=400 — re-initialize, run with shared_buffers=256MB
+$BASELINE_BIN/pgbench -p 5440 -i -s 400 --no-vacuum postgres
+$WET_BIN/pgbench    -p 5441 -i -s 400 --no-vacuum postgres
+
+# W3: scale=200 — re-initialize, run with shared_buffers=2GB
+$BASELINE_BIN/pgbench -p 5440 -i -s 200 --no-vacuum postgres
+$WET_BIN/pgbench    -p 5441 -i -s 200 --no-vacuum postgres</code></pre>
+
+      <h3>Step 1 — Per-round startup sequence</h3>
+      <p>
+        For each round and each variant, <code>run_bench.sh</code> stops all clusters,
+        edits <code>postgresql.conf</code> via Python regex to set <code>shared_buffers</code>
+        and <code>wait_event_capture</code>, then starts the appropriate cluster:
+      </p>
+      <pre><code># Set shared_buffers and wait_event_capture in postgresql.conf at runtime:
+python3 -c "
+import re
+with open('/data/pg-wet/postgresql.conf', 'r') as f:
+    content = f.read()
+content = re.sub(r'^#?shared_buffers\s*=.*',
+                 \"shared_buffers = '8GB'\", content, flags=re.MULTILINE)
+content = re.sub(r'^#?wait_event_capture\s*=.*',
+                 \"wait_event_capture = 'stats'\", content, flags=re.MULTILINE)
+with open('/data/pg-wet/postgresql.conf', 'w') as f:
+    f.write(content)
+"
+
+# Start cluster and confirm settings:
+su - pgbench -c "/opt/pg-wet/bin/pg_ctl -D /data/pg-wet -l /tmp/wet.log start"
+su - pgbench -c "/opt/pg-wet/bin/psql -p 5441 -t \
+  -c 'SHOW wait_event_capture;' postgres"</code></pre>
+
+      <h3>Step 2 — pgbench invocations</h3>
+
+      <h4>W1 — Read-only cached</h4>
+      <pre><code># shared_buffers=8GB, scale=100, data ~1.6 GB fits in buffer pool
+# Rung 1 (vanilla baseline, port 5440):
+su - pgbench -c "/opt/pg-baseline/bin/pgbench \
+  -p 5440 -S -c 16 -j 16 -T 60 -n --no-vacuum postgres"
+
+# Rungs 3-5 (wet cluster, port 5441 — wait_event_capture set before start):
+su - pgbench -c "/opt/pg-wet/bin/pgbench \
+  -p 5441 -S -c 16 -j 16 -T 60 -n --no-vacuum postgres"</code></pre>
+
+      <h4>W2 — Wait-saturated (key test)</h4>
+      <pre><code># shared_buffers=256MB, scale=400, data ~6.4 GB >> buffer pool
+# Rung 1 (vanilla baseline, port 5440):
+su - pgbench -c "/opt/pg-baseline/bin/pgbench \
+  -p 5440 -S -c 32 -j 16 -T 60 -n --no-vacuum postgres"
+
+# Rungs 3-5 (wet cluster, port 5441):
+su - pgbench -c "/opt/pg-wet/bin/pgbench \
+  -p 5441 -S -c 32 -j 16 -T 60 -n --no-vacuum postgres"</code></pre>
+
+      <h4>W3 — TPC-B read-write</h4>
+      <pre><code># shared_buffers=2GB, scale=200, default TPC-B script (no -S)
+# Rung 1 (vanilla baseline, port 5440):
+su - pgbench -c "/opt/pg-baseline/bin/pgbench \
+  -p 5440 -c 32 -j 16 -T 60 -n --no-vacuum postgres"
+
+# Rungs 3-5 (wet cluster, port 5441):
+su - pgbench -c "/opt/pg-wet/bin/pgbench \
+  -p 5441 -c 32 -j 16 -T 60 -n --no-vacuum postgres"</code></pre>
+
+      <h3>Step 3 — capture level changes between variants</h3>
+      <p>
+        <code>wait_event_capture</code> is set by rewriting <code>postgresql.conf</code> and
+        restarting the cluster (full stop/start cycle), not by a live <code>ALTER SYSTEM</code>.
+        This ensures a clean server state between variants and avoids any residual DSA ring
+        state from a previous <code>trace</code> run.
+      </p>
+      <pre><code># Sequence within one round for W2:
+# --- variant: off ---
+# (set shared_buffers=256MB, wait_event_capture=off, restart wet cluster)
+pgbench -p 5441 -S -c 32 -j 16 -T 60 -n --no-vacuum postgres
+
+# --- variant: stats ---
+# (set wait_event_capture=stats, restart)
+pgbench -p 5441 -S -c 32 -j 16 -T 60 -n --no-vacuum postgres
+
+# --- variant: trace ---
+# (set wait_event_capture=trace, restart)
+pgbench -p 5441 -S -c 32 -j 16 -T 60 -n --no-vacuum postgres</code></pre>
+
+      <h3>Step 4 — W2 wait-event proof queries (run during load)</h3>
+      <pre><code># Reset stats counters before the evidence-collection run:
+su - pgbench -c "/opt/pg-wet/bin/psql -p 5441 \
+  -c 'SELECT pg_stat_reset_wait_event_timing_all();' postgres"
+
+# Start a 30s load run in background, sample midway:
+su - pgbench -c "/opt/pg-wet/bin/pgbench \
+  -p 5441 -S -c 32 -j 16 -T 30 -n --no-vacuum postgres" &
+sleep 15
+
+# CPU idle% (low = IO/wait bound):
+vmstat 1 5
+
+# Active waits from pg_stat_activity:
+/opt/pg-wet/bin/psql -p 5441 -t postgres -c "
+  SELECT coalesce(wait_event_type,'CPU')    AS type,
+         coalesce(wait_event,'running')      AS event,
+         count(*)
+  FROM pg_stat_activity
+  WHERE state = 'active'
+  GROUP BY 1, 2
+  ORDER BY 3 DESC
+  LIMIT 8;"
+
+wait   # let pgbench finish
+
+# Aggregate from pg_stat_wait_event_timing:
+/opt/pg-wet/bin/psql -p 5441 postgres -c "
+  SELECT wait_event_type, wait_event,
+         sum(count)                        AS total_count,
+         sum(total_wait_time_us) / 1000.0  AS total_wait_ms
+  FROM pg_stat_wait_event_timing
+  GROUP BY wait_event_type, wait_event
+  ORDER BY total_count DESC
+  LIMIT 10;"
+
+# Total wait transitions in ~30s:
+/opt/pg-wet/bin/psql -p 5441 -t postgres -c \
+  "SELECT sum(count) FROM pg_stat_wait_event_timing;"</code></pre>
+
+      <h3>Rate-limited mode (planned — not yet run)</h3>
+      <p>
+        Once baseline TPS is established from the stress runs, a second pass will use
+        <code>pgbench --rate</code> at approximately 50% of that TPS to measure per-transaction
+        latency overhead without saturating the server. Metrics: p95/p99 latency.
+      </p>
+      <pre><code># Example — set --rate to ~50% of observed W2 stress TPS
+# (replace HALF_TPS with the actual computed value)
+HALF_TPS=5000   # placeholder — derive from stress results
+
+# Rung 1 (baseline):
+su - pgbench -c "/opt/pg-baseline/bin/pgbench \
+  -p 5440 -S -c 32 -j 16 -T 60 -n --no-vacuum \
+  --rate=$HALF_TPS --latency-limit=1000 postgres"
+
+# Rungs 3-5 (wet, capture=off/stats/trace):
+su - pgbench -c "/opt/pg-wet/bin/pgbench \
+  -p 5441 -S -c 32 -j 16 -T 60 -n --no-vacuum \
+  --rate=$HALF_TPS --latency-limit=1000 postgres"</code></pre>
     </section>
 
     <!-- Open questions -->
