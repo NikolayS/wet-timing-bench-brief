@@ -796,7 +796,7 @@ vmstat 1 5</code></pre>
       </p>
       <pre><code>for round in 1 2 3; do
   for variant in baseline off stats trace; do
-    pgbench -S -c 16 -j 16 -T 180 -P 15 -r -n ... >> bench.log
+    pgbench -S -c 16 -j 16 -T 180 -P 15 -r -n postgres
   done
 done</code></pre>
 
@@ -806,8 +806,9 @@ done</code></pre>
         <li>Rounds: <strong>3 rounds</strong> per (workload × variant).</li>
         <li>Warmup: discard round 1; report on rounds 2–3.</li>
         <li>Progress reporting: <code>-P 15</code> (every 15 s) to confirm the run has reached steady-state before accepting the result.</li>
-        <li>Latency report: <code>-r</code> gives per-statement avg latency in the pgbench summary — used as the primary latency metric for W3.</li>
+        <li>Latency report: <code>-r</code> gives per-statement avg latency in the pgbench summary — the primary latency metric for W3.</li>
         <li>Summary statistics: <strong>median TPS</strong> (W1, W2); <strong>avg / p95 / p99 latency</strong> (W3).</li>
+        <li><code>--log</code> (<code>-l</code>) is intentionally <strong>NOT used</strong> — per-transaction file logging is itself an observer-effect source (one write per transaction to disk) and would inflate overhead numbers unless the log lives on a RAM disk.</li>
       </ul>
 
       <h3>Between-run resets</h3>
@@ -1063,49 +1064,43 @@ su - pgbench -c "/opt/pg-wet/bin/pg_ctl -D /data/pg-wet -l /tmp/wet.log start"
 su - pgbench -c "/opt/pg-wet/bin/psql -p 5441 -t \
   -c 'SHOW wait_event_capture;' postgres"</code></pre>
 
-      <h3>Step 2 — pgbench invocations</h3>
+      <h3>Step 2 — pgbench measured-run command (canonical)</h3>
       <p>
-        All workloads use the same base flags: <code>-S -c 16 -j 16 -T 180 -P 15 -r -n</code>.
-        Rationale: <code>-c 16 -j 16</code> matches clients and worker threads to the 16
-        dedicated vCPUs, avoiding pgbench oversubscription when co-located with Postgres;
-        <code>-T 180</code> (3 min) for stable numbers; <code>-P 15</code> for 15s progress
-        intervals to confirm steady-state; <code>-r</code> for per-statement latency in the
-        summary; <code>-n</code> skips vacuum.
+        The measured run command is identical for every workload and every variant.
+        It is defined once here; all workload descriptions reference it.
       </p>
+      <pre><code># Canonical measured-run command (W1, W2, W3 — all variants):
+pgbench -S -c 16 -j 16 -T 180 -P 15 -r -n postgres
 
-      <h4>W1 — Read-only cached (stress, TPS)</h4>
-      <pre><code># shared_buffers=8GB, scale=100, data ~1.6 GB fits in buffer pool
-# Variant: vanilla baseline (port 5440):
-su - pgbench -c "/opt/pg-baseline/bin/pgbench \
-  -p 5440 -S -c 16 -j 16 -T 180 -P 15 -r -n postgres"
+# Run via su - pgbench against the appropriate port:
+#   baseline cluster  →  -p 5440  (/opt/pg-baseline/bin/pgbench)
+#   wet cluster       →  -p 5441  (/opt/pg-wet/bin/pgbench)
+# shared_buffers and wait_event_capture are set in postgresql.conf before each start.</code></pre>
 
-# Variants: off / stats / trace (wet cluster, port 5441 — capture set before start):
-su - pgbench -c "/opt/pg-wet/bin/pgbench \
-  -p 5441 -S -c 16 -j 16 -T 180 -P 15 -r -n postgres"</code></pre>
+      <p>Flag rationale:</p>
+      <ul>
+        <li><code>-S</code> — SELECT-only script (all three workloads).</li>
+        <li><code>-c 16 -j 16</code> — clients = worker threads = vCPUs; avoids pgbench oversubscribing the 16 dedicated cores when co-located with Postgres.</li>
+        <li><code>-T 180</code> — 3-minute run duration for stable numbers (per Dmitry).</li>
+        <li><code>-P 15</code> — progress report every 15 s; used to confirm steady-state before accepting results.</li>
+        <li><code>-r</code> — per-statement latency statistics in the summary; the primary metric for W3.</li>
+        <li><code>-n</code> — skip vacuum.</li>
+        <li><strong><code>--log</code> / <code>-l</code> intentionally omitted</strong> — per-transaction file logging is itself an observer-effect source (one write per transaction) and would inflate overhead numbers unless the log lives on a RAM disk.</li>
+      </ul>
 
-      <h4>W2 — Wait-saturated (stress, TPS)</h4>
-      <pre><code># shared_buffers=256MB, scale=400, data ~6.4 GB >> buffer pool
-# Variant: vanilla baseline (port 5440):
-su - pgbench -c "/opt/pg-baseline/bin/pgbench \
-  -p 5440 -S -c 16 -j 16 -T 180 -P 15 -r -n postgres"
-
-# Variants: off / stats / trace (wet cluster, port 5441):
-su - pgbench -c "/opt/pg-wet/bin/pgbench \
-  -p 5441 -S -c 16 -j 16 -T 180 -P 15 -r -n postgres"</code></pre>
-
-      <h4>W3 — Latency at 50% capacity (rate-limited)</h4>
-      <pre><code># Same dataset as W2 (scale=400, shared_buffers=256MB).
-# RATE = 50% of W2 baseline median TPS (filled after W2 stress runs).
-# Metric: avg / p95 / p99 latency from pgbench -r output.
-RATE=&lt;50%-of-W2-baseline-TPS&gt;   # e.g. 4500 if W2 baseline = ~9000 TPS
-
-# Variant: vanilla baseline (port 5440):
-su - pgbench -c "/opt/pg-baseline/bin/pgbench \
-  -p 5440 -S -c 16 -j 16 -T 180 -P 15 -r -n -R $RATE postgres"
-
-# Variants: off / stats / trace (wet cluster, port 5441):
-su - pgbench -c "/opt/pg-wet/bin/pgbench \
-  -p 5441 -S -c 16 -j 16 -T 180 -P 15 -r -n -R $RATE postgres"</code></pre>
+      <p>The only two justified additions to the canonical command:</p>
+      <ol>
+        <li>
+          <strong>W3 only</strong>: append <code>-R &lt;rate&gt;</code> where
+          <code>rate</code> = 50% of the W2 baseline median TPS (derived after W2 stress runs complete).
+          <pre><code>pgbench -S -c 16 -j 16 -T 180 -P 15 -r -n -R $RATE postgres</code></pre>
+        </li>
+        <li>
+          <strong>W2 diagnostic pass only</strong> (not a measured run): a separate short run
+          under <code>capture=stats</code> to collect wait-event evidence. See Step 4 below.
+          This run is not included in the TPS/latency results.
+        </li>
+      </ol>
 
       <h3>Step 3 — capture level changes between variants</h3>
       <p>
@@ -1114,34 +1109,44 @@ su - pgbench -c "/opt/pg-wet/bin/pgbench \
         a clean server state and eliminates residual DSA ring state from a prior <code>trace</code>
         run.
       </p>
-      <pre><code># Sequence within one round (W2 example, same pattern for W1 and W3):
+      <p>
+        Each variant is a full stop/start cycle of the appropriate cluster with the target
+        <code>wait_event_capture</code> value written to <code>postgresql.conf</code> before
+        start. The measured-run command (see Step 2) is identical for every variant;
+        only the port and cluster binary differ.
+      </p>
+      <pre><code># Sequence within one round — W2 example (same pattern for W1 and W3):
 
-# --- variant: baseline (separate binary, port 5440) ---
-# (set shared_buffers=256MB on baseline cluster, start it)
+# 1. baseline (separate binary, /opt/pg-baseline, port 5440)
+#    set shared_buffers=256MB on baseline cluster, start
 su - pgbench -c "/opt/pg-baseline/bin/pgbench \
   -p 5440 -S -c 16 -j 16 -T 180 -P 15 -r -n postgres"
 
-# --- variant: off (wet binary, port 5441) ---
-# (set shared_buffers=256MB, wait_event_capture=off, start wet cluster)
+# 2. off (wet binary, /opt/pg-wet, port 5441)
+#    set shared_buffers=256MB + wait_event_capture=off, start wet cluster
 su - pgbench -c "/opt/pg-wet/bin/pgbench \
   -p 5441 -S -c 16 -j 16 -T 180 -P 15 -r -n postgres"
 
-# --- variant: stats ---
-# (set wait_event_capture=stats, restart wet cluster)
+# 3. stats  (set wait_event_capture=stats, restart)
 su - pgbench -c "/opt/pg-wet/bin/pgbench \
   -p 5441 -S -c 16 -j 16 -T 180 -P 15 -r -n postgres"
 
-# --- variant: trace ---
-# (set wait_event_capture=trace, restart wet cluster)
+# 4. trace  (set wait_event_capture=trace, restart)
 su - pgbench -c "/opt/pg-wet/bin/pgbench \
   -p 5441 -S -c 16 -j 16 -T 180 -P 15 -r -n postgres"</code></pre>
 
-      <h3>Step 4 — W2 wait-event proof queries (run during load)</h3>
-      <pre><code># Reset stats counters before the evidence-collection run:
+      <h3>Step 4 — W2 wait-event proof queries (diagnostic pass, not a measured run)</h3>
+      <p>
+        Run once, separately from the interleaved rounds, with <code>capture=stats</code>.
+        Purpose: confirm the W2 workload is genuinely wait-bound. Results go into the
+        "W2 wait-event proof" table in Section 9; they are not included in TPS results.
+      </p>
+      <pre><code># Reset stats counters before the diagnostic run:
 su - pgbench -c "/opt/pg-wet/bin/psql -p 5441 \
   -c 'SELECT pg_stat_reset_wait_event_timing_all();' postgres"
 
-# Start a 180s load run in background, sample midway:
+# Start a 180s diagnostic load run in background, sample midway:
+# (same canonical command as measured runs — no --log)
 su - pgbench -c "/opt/pg-wet/bin/pgbench \
   -p 5441 -S -c 16 -j 16 -T 180 -P 15 -r -n postgres" &
 sleep 90
