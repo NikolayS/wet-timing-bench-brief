@@ -657,9 +657,12 @@ su - pgbench -c "$WET/psql -p 5441 -d postgres -tAc \
       <h2>5. Workloads</h2>
 
       <p>
-        Workloads are chosen so that the feature's per-event cost is actually exercised.
-        The key question for each workload is: <em>what is the bottleneck, and how many
-        wait-event transitions occur per second?</em>
+        All three workloads use <code>pgbench -S</code> (SELECT-only). Read-write would add
+        WAL/lock noise to the overhead signal; SELECT-only is sufficient to exercise the
+        wait-event instrumentation path cleanly. Uniform pgbench flags across all runs:
+        <code>-c 16 -j 16 -T 180 -P 15 -r -n</code>
+        (clients=jobs=cores; 3-minute runs for stable numbers per Dmitry; 15s progress
+        intervals to confirm steady-state; per-statement latency report; no vacuum).
       </p>
 
       <div class="table-wrap">
@@ -668,42 +671,50 @@ su - pgbench -c "$WET/psql -p 5441 -d postgres -tAc \
             <tr>
               <th>ID</th>
               <th>Description</th>
-              <th>pgbench params</th>
+              <th>pgbench command</th>
               <th>Bottleneck / wait profile</th>
-              <th>What it measures</th>
+              <th>Headline metric</th>
             </tr>
           </thead>
           <tbody>
             <tr>
               <td><strong>W1</strong></td>
               <td>Read-only, fully cached</td>
-              <td><code>pgbench -S -c 16 -j 16 -T 60 -n --no-vacuum</code>, scale 100, <code>shared_buffers=8GB</code> (data ~1.6 GB, fits in buffer pool)</td>
+              <td><code>pgbench -S -c 16 -j 16 -T 180 -P 15 -r -n</code><br>scale 100, <code>shared_buffers=8GB</code><br>(data ~1.6 GB, fits in buffer pool)</td>
               <td>CPU-bound; very few waits per transaction.</td>
-              <td>Pure inline-gate cost — waits rarely fire, so this isolates the constant overhead of the code path itself.</td>
+              <td><strong>TPS.</strong> Measures the pure inline-gate cost — waits rarely fire, isolating constant overhead of the instrumented code path.</td>
             </tr>
             <tr>
               <td><strong>W2</strong></td>
               <td>Wait-saturated <em>(key test)</em></td>
-              <td><code>pgbench -S -c 32 -j 16 -T 60 -n --no-vacuum</code>, scale 400, <code>shared_buffers=256MB</code> (data ~6.4 GB &gg; SB)</td>
-              <td>Constant buffer-mapping / I/O / LWLock waits. Working set far exceeds buffer pool.</td>
-              <td>Maximum wait-event transition rate. This is where the per-event cost of <code>stats</code>/<code>trace</code> is most visible. <strong>Proof obligation:</strong> dump top wait events + total wait-event count; confirm wait-bound (not CPU-bound) via <code>vmstat</code>.</td>
+              <td><code>pgbench -S -c 16 -j 16 -T 180 -P 15 -r -n</code><br>scale 400, <code>shared_buffers=256MB</code><br>(data ~6.4 GB &gg; SB)</td>
+              <td>Constant buffer-mapping / I/O / LWLock waits. Working set far exceeds buffer pool — maximum wait-event transition rate.</td>
+              <td><strong>TPS</strong> + wait-event proof (top events by count, total transitions). Per-event cost of <code>stats</code>/<code>trace</code> is most visible here.</td>
             </tr>
             <tr>
               <td><strong>W3</strong></td>
-              <td>TPC-B read-write</td>
-              <td><code>pgbench -c 32 -j 16 -T 60 -n --no-vacuum</code> (default TPC-B script), scale 200, <code>shared_buffers=2GB</code></td>
-              <td>WAL writes, relation locks, <code>ClientRead</code> waits.</td>
-              <td>Production-representative mixed read-write with WAL and lock-wait events.</td>
+              <td>Latency at 50% capacity</td>
+              <td><code>pgbench -S -c 16 -j 16 -T 180 -P 15 -r -n -R &lt;rate&gt;</code><br>Same setup as W2 (scale 400, <code>shared_buffers=256MB</code>)<br><code>rate</code> = 50% of W2 baseline median TPS</td>
+              <td>Same wait-heavy environment as W2 but server not saturated — overhead surfaces as added latency per call, not TPS drop. Production-realistic load level.</td>
+              <td><strong>Latency</strong> (avg, p95, p99). Avoids pgbench co-location CPU contention at full saturation. Rate derived from W2 results.</td>
             </tr>
           </tbody>
         </table>
       </div>
 
+      <div class="callout">
+        <div class="callout-title">Why -c 16 = -j 16</div>
+        The benchmark host has 16 dedicated vCPUs. Setting clients = jobs = 16 matches
+        pgbench worker threads to cores and avoids pgbench itself oversubscribing the CPU
+        when co-located with the Postgres server.
+      </div>
+
       <h3>W2 proof obligation</h3>
       <p>
-        Before trusting W2 numbers, collect evidence that the workload is genuinely wait-bound:
+        Before trusting W2 numbers, confirm the workload is genuinely wait-bound (not CPU-bound).
+        Run these while pgbench is active:
       </p>
-      <pre><code>-- Top wait events during W2 (run while pgbench is active):
+      <pre><code>-- Top wait events by transition count:
 SELECT wait_event_type, wait_event,
        sum(count)                        AS total_count,
        sum(total_wait_time_us) / 1000.0  AS total_wait_ms
@@ -712,7 +723,7 @@ GROUP BY wait_event_type, wait_event
 ORDER BY total_count DESC
 LIMIT 10;
 
--- Mid-run snapshot from pg_stat_activity:
+-- Mid-run snapshot of what backends are waiting on:
 SELECT coalesce(wait_event_type, 'CPU')     AS type,
        coalesce(wait_event, 'running')       AS event,
        count(*)
@@ -722,48 +733,54 @@ GROUP BY 1, 2
 ORDER BY 3 DESC
 LIMIT 8;
 
--- Confirm CPU is not maxed out (low idle% = wait-bound):
+-- Confirm CPU is not maxed out (high idle% = IO/wait bound):
 vmstat 1 5</code></pre>
       <p>
-        If <code>mpstat</code> shows CPU at 100% user and wait counts are low, the workload is
-        CPU-bound and W2 is not exercising the feature — adjust <code>shared_buffers</code>
-        or scale until waits dominate.
+        If <code>vmstat</code> shows CPU idle near 0% and wait-event counts are low, the
+        workload is CPU-bound and W2 is not exercising the instrumentation path — reduce
+        <code>shared_buffers</code> or increase scale until buffer/IO waits dominate.
       </p>
     </section>
 
     <!-- 6. Load modes -->
     <section id="load-modes">
-      <h2>6. Load modes</h2>
+      <h2>6. Load modes — why two perspectives</h2>
 
-      <p>Two complementary perspectives on overhead — both are required for a complete picture.</p>
-
-      <h3>Stress mode (100% capacity, max TPS)</h3>
       <p>
-        Run pgbench at maximum concurrency the system can sustain. The system is bottlenecked
-        by the limiting resource (CPU or I/O). Metric: <strong>TPS</strong>.
-      </p>
-      <p>
-        Caveat: if the bottleneck is CPU and the feature adds CPU work, the overhead is visible
-        as reduced TPS. If the bottleneck is I/O, the feature's CPU cost may hide behind I/O
-        wait — overhead can appear lower than it really is.
+        W1 and W2 run at full concurrency (stress mode); W3 runs rate-limited at ~50% capacity.
+        Both perspectives are necessary.
       </p>
 
-      <h3>Rate-limited mode (~50% capacity, latency-focused)</h3>
+      <h3>Stress mode — W1 and W2</h3>
       <p>
-        Use <code>pgbench --rate</code> to set TPS at roughly half the system's max capacity.
-        The system is not saturated, so the feature's per-call cost shows up as
-        <em>added latency per transaction</em> rather than reduced throughput.
-        Metric: <strong>p95 / p99 latency</strong>.
+        The system is driven to the bottleneck resource (CPU for W1, I/O/buffer for W2).
+        Metric: <strong>TPS</strong>. Overhead from the feature shows as reduced throughput.
       </p>
       <p>
-        This mode is more production-realistic (most production systems run well below saturation)
-        and avoids the masking effect described above.
+        Caveat: when the bottleneck is I/O, additional CPU work from the instrumentation
+        may hide behind I/O wait time — overhead can look smaller than it is in a
+        CPU-saturated scenario. W1 (CPU-bound) and W2 (IO/wait-bound) together expose
+        overhead under both bottleneck types.
+      </p>
+
+      <h3>Rate-limited mode — W3</h3>
+      <p>
+        Run the same wait-heavy environment as W2 but hold TPS at ~50% of the W2 baseline
+        via <code>pgbench -R &lt;rate&gt;</code>. The server is not saturated, so the
+        feature's per-wait-event cost surfaces as <em>added latency</em> per transaction
+        rather than reduced throughput. Metric: <strong>avg / p95 / p99 latency</strong>.
+      </p>
+      <p>
+        This is more production-realistic: most production systems run well below saturation.
+        It also eliminates the CPU-masking effect and reduces pgbench co-location contention
+        (pgbench and Postgres share the same 16 cores; at full load pgbench competes with the
+        server).
       </p>
       <div class="callout">
-        <div class="callout-title">Single-box caveat</div>
-        When pgbench and Postgres run on the same machine, pgbench itself consumes CPU.
-        At 100% capacity the benchmark tool competes with the server. Rate-limited mode
-        reduces this contention and produces cleaner latency measurements.
+        <div class="callout-title">Deriving the W3 rate</div>
+        After the W2 stress runs complete, take the baseline (vanilla) median TPS and set
+        <code>-R</code> to 50% of that value. The same rate is used for all four W3 variants
+        (baseline / off / stats / trace) so latency differences are directly comparable.
       </div>
     </section>
 
@@ -773,28 +790,30 @@ vmstat 1 5</code></pre>
 
       <h3>Interleaving (cancels temporal drift)</h3>
       <p>
-        Within each round, cycle through all rungs in sequence before moving to the next round.
-        Do not run all trials for rung 1 then all for rung 2, etc. — drift (thermal, memory
-        pressure, OS background tasks) will bias inter-rung comparisons.
+        Within each round, cycle through all variants in sequence before moving to the next round.
+        Do not run all trials for one variant then all for another — thermal and memory-pressure
+        drift will bias inter-variant comparisons.
       </p>
-      <pre><code>for round in 1 2 3 4 5; do
-  for rung in vanilla stub off stats trace; do
-    pgbench ... --log --progress 10 -T 60 >> bench.log
+      <pre><code>for round in 1 2 3; do
+  for variant in baseline off stats trace; do
+    pgbench -S -c 16 -j 16 -T 180 -P 15 -r -n ... >> bench.log
   done
 done</code></pre>
 
       <h3>Run parameters</h3>
       <ul>
-        <li>Duration: <strong>60 seconds per run</strong>.</li>
-        <li>Rounds: <strong>5 rounds</strong> per (workload × mode × rung).</li>
-        <li>Warmup: discard round 1; report on rounds 2–5.</li>
-        <li>Summary statistics: <strong>median TPS</strong>, <strong>p95 latency</strong>, <strong>p99 latency</strong>.</li>
+        <li>Duration: <strong>180 seconds (3 minutes) per run</strong> — chosen by Dmitry for stable numbers.</li>
+        <li>Rounds: <strong>3 rounds</strong> per (workload × variant).</li>
+        <li>Warmup: discard round 1; report on rounds 2–3.</li>
+        <li>Progress reporting: <code>-P 15</code> (every 15 s) to confirm the run has reached steady-state before accepting the result.</li>
+        <li>Latency report: <code>-r</code> gives per-statement avg latency in the pgbench summary — used as the primary latency metric for W3.</li>
+        <li>Summary statistics: <strong>median TPS</strong> (W1, W2); <strong>avg / p95 / p99 latency</strong> (W3).</li>
       </ul>
 
       <h3>Between-run resets</h3>
       <p>
         To isolate static overhead from observer effect, do <em>not</em> reset
-        <code>pg_stat_wait_event_timing</code> between runs during the primary benchmark.
+        <code>pg_stat_wait_event_timing</code> between variants during the primary benchmark.
         A separate reset-sweep pass will quantify the observer effect independently.
       </p>
     </section>
@@ -826,8 +845,8 @@ done</code></pre>
             <tr><th>Parameter</th><th>Value</th></tr>
           </thead>
           <tbody>
-            <tr><td>Compiler</td><td>gcc, <code>-O2</code></td></tr>
-            <tr><td>Build system</td><td>meson</td></tr>
+            <tr><td>Compiler</td><td>gcc (ccache wrapper), <code>-O2</code></td></tr>
+            <tr><td>Build system</td><td>autoconf (<code>./configure</code>)</td></tr>
             <tr><td>Upstream base</td><td><code>89eafad297a</code> (master)</td></tr>
             <tr><td>Patch branch</td><td><code>wet-series</code></td></tr>
             <tr><td>Series HEAD</td><td><code>983f0ec</code></td></tr>
@@ -891,146 +910,92 @@ wait_event_capture = off   # changed to stats/trace per-run by run_bench.sh
 
     <!-- 9. Results -->
     <section id="results">
-      <h2>9. Results <small style="font-size:0.7em; font-weight:400; color:var(--text-muted)">(populated on completion)</small></h2>
+      <h2>9. Results <small style="font-size:0.7em; font-weight:400; color:var(--text-muted)">(populated on completion, ~2h)</small></h2>
 
       <div class="callout warn">
         <div class="callout-title">Work in progress</div>
-        Numbers below are filled from <code>/root/bench.log</code> when the benchmark run finishes.
+        Numbers below are filled from <code>/root/bench.log</code> when the benchmark run finishes (~2h).
         Do not treat any cell as final until the run completes and the validity gate (Section 4)
         has been passed for each build.
       </div>
 
-      <h3>W1 — Read-only cached (stress mode)</h3>
+      <h3>W1 — Read-only cached (stress, TPS)</h3>
+      <p class="results-note">Config: scale=100, shared_buffers=8GB, pgbench -S -c 16 -j 16 -T 180 -P 15 -r -n. Metric: median TPS of rounds 2–3.</p>
       <div class="table-wrap">
         <table>
           <thead>
             <tr>
-              <th>Rung</th>
+              <th>Variant</th>
               <th>Median TPS</th>
-              <th>p95 lat (ms)</th>
-              <th>p99 lat (ms)</th>
               <th>%Δ vs baseline</th>
               <th>%Δ vs off</th>
             </tr>
           </thead>
           <tbody>
-            <tr><td>1 — vanilla</td><td>—</td><td>—</td><td>—</td><td>reference</td><td>—</td></tr>
-            <tr><td>2 — stub</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
-            <tr><td>3 — off</td><td>—</td><td>—</td><td>—</td><td>—</td><td>reference</td></tr>
-            <tr><td>4 — stats</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
-            <tr><td>5 — trace</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
+            <tr><td>1 — vanilla (baseline)</td><td>—</td><td>reference</td><td>—</td></tr>
+            <tr><td>3 — off</td><td>—</td><td>—</td><td>reference</td></tr>
+            <tr><td>4 — stats</td><td>—</td><td>—</td><td>—</td></tr>
+            <tr><td>5 — trace</td><td>—</td><td>—</td><td>—</td></tr>
           </tbody>
         </table>
       </div>
 
-      <h3>W1 — Read-only cached (rate-limited, ~50% capacity)</h3>
+      <h3>W2 — Wait-saturated (stress, TPS)</h3>
+      <p class="results-note">Config: scale=400, shared_buffers=256MB, pgbench -S -c 16 -j 16 -T 180 -P 15 -r -n. Metric: median TPS of rounds 2–3.</p>
       <div class="table-wrap">
         <table>
           <thead>
             <tr>
-              <th>Rung</th>
+              <th>Variant</th>
               <th>Median TPS</th>
-              <th>p95 lat (ms)</th>
-              <th>p99 lat (ms)</th>
               <th>%Δ vs baseline</th>
               <th>%Δ vs off</th>
             </tr>
           </thead>
           <tbody>
-            <tr><td>1 — vanilla</td><td>—</td><td>—</td><td>—</td><td>reference</td><td>—</td></tr>
-            <tr><td>2 — stub</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
-            <tr><td>3 — off</td><td>—</td><td>—</td><td>—</td><td>—</td><td>reference</td></tr>
-            <tr><td>4 — stats</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
-            <tr><td>5 — trace</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
+            <tr><td>1 — vanilla (baseline)</td><td>—</td><td>reference</td><td>—</td></tr>
+            <tr><td>3 — off</td><td>—</td><td>—</td><td>reference</td></tr>
+            <tr><td>4 — stats</td><td>—</td><td>—</td><td>—</td></tr>
+            <tr><td>5 — trace</td><td>—</td><td>—</td><td>—</td></tr>
           </tbody>
         </table>
       </div>
 
-      <h3>W2 — Wait-saturated (stress mode)</h3>
+      <h3>W2 — Wait-event proof</h3>
+      <p class="results-note">Collected during a dedicated W2 stats run. Confirms workload is wait-bound, not CPU-bound.</p>
       <div class="table-wrap">
         <table>
           <thead>
             <tr>
-              <th>Rung</th>
-              <th>Median TPS</th>
-              <th>p95 lat (ms)</th>
-              <th>p99 lat (ms)</th>
-              <th>%Δ vs baseline</th>
-              <th>%Δ vs off</th>
+              <th>wait_event_type</th>
+              <th>wait_event</th>
+              <th>total_count</th>
+              <th>total_wait_ms</th>
             </tr>
           </thead>
           <tbody>
-            <tr><td>1 — vanilla</td><td>—</td><td>—</td><td>—</td><td>reference</td><td>—</td></tr>
-            <tr><td>2 — stub</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
-            <tr><td>3 — off</td><td>—</td><td>—</td><td>—</td><td>—</td><td>reference</td></tr>
-            <tr><td>4 — stats</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
-            <tr><td>5 — trace</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
+            <tr><td colspan="4" style="text-align:center; color:var(--text-muted); font-style:italic">— populated from pg_stat_wait_event_timing query —</td></tr>
           </tbody>
         </table>
       </div>
+      <p class="results-note">Total wait transitions in 180s: <strong>—</strong> (~— /sec). CPU idle% (vmstat): <strong>—%</strong>.</p>
 
-      <h3>W2 — Wait-saturated (rate-limited, ~50% capacity)</h3>
+      <h3>W3 — Latency at 50% capacity</h3>
+      <p class="results-note">Config: same as W2 but rate-limited with -R &lt;50% of W2 baseline TPS&gt;. Rate used: — TPS. Metric: avg / p95 / p99 latency.</p>
       <div class="table-wrap">
         <table>
           <thead>
             <tr>
-              <th>Rung</th>
-              <th>Median TPS</th>
+              <th>Variant</th>
+              <th>Avg lat (ms)</th>
               <th>p95 lat (ms)</th>
               <th>p99 lat (ms)</th>
-              <th>%Δ vs baseline</th>
-              <th>%Δ vs off</th>
+              <th>%Δ avg vs baseline</th>
+              <th>%Δ avg vs off</th>
             </tr>
           </thead>
           <tbody>
-            <tr><td>1 — vanilla</td><td>—</td><td>—</td><td>—</td><td>reference</td><td>—</td></tr>
-            <tr><td>2 — stub</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
-            <tr><td>3 — off</td><td>—</td><td>—</td><td>—</td><td>—</td><td>reference</td></tr>
-            <tr><td>4 — stats</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
-            <tr><td>5 — trace</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
-          </tbody>
-        </table>
-      </div>
-
-      <h3>W3 — TPC-B read-write (stress mode)</h3>
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Rung</th>
-              <th>Median TPS</th>
-              <th>p95 lat (ms)</th>
-              <th>p99 lat (ms)</th>
-              <th>%Δ vs baseline</th>
-              <th>%Δ vs off</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr><td>1 — vanilla</td><td>—</td><td>—</td><td>—</td><td>reference</td><td>—</td></tr>
-            <tr><td>2 — stub</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
-            <tr><td>3 — off</td><td>—</td><td>—</td><td>—</td><td>—</td><td>reference</td></tr>
-            <tr><td>4 — stats</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
-            <tr><td>5 — trace</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
-          </tbody>
-        </table>
-      </div>
-
-      <h3>W3 — TPC-B read-write (rate-limited, ~50% capacity)</h3>
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Rung</th>
-              <th>Median TPS</th>
-              <th>p95 lat (ms)</th>
-              <th>p99 lat (ms)</th>
-              <th>%Δ vs baseline</th>
-              <th>%Δ vs off</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr><td>1 — vanilla</td><td>—</td><td>—</td><td>—</td><td>reference</td><td>—</td></tr>
-            <tr><td>2 — stub</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
+            <tr><td>1 — vanilla (baseline)</td><td>—</td><td>—</td><td>—</td><td>reference</td><td>—</td></tr>
             <tr><td>3 — off</td><td>—</td><td>—</td><td>—</td><td>—</td><td>reference</td></tr>
             <tr><td>4 — stats</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
             <tr><td>5 — trace</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
@@ -1041,6 +1006,7 @@ wait_event_capture = off   # changed to stats/trace per-run by run_bench.sh
       <p class="results-note">
         Source: <code>/root/bench.log</code> on the CCX43 benchmark host.
         Results will be posted to the PR thread once all runs complete.
+        Rung 2 (stub build — patched without <code>--enable-wait-event-timing</code>) is planned but not yet built; its row will be added once available.
       </p>
     </section>
 
@@ -1056,21 +1022,22 @@ wait_event_capture = off   # changed to stats/trace per-run by run_bench.sh
       </p>
 
       <h3>Step 0 — Data initialization</h3>
-      <p>Run once per workload tier before the interleaved benchmark rounds.</p>
+      <p>
+        Run once per workload tier before the interleaved benchmark rounds.
+        W3 reuses the W2 dataset (same scale=400, same shared_buffers=256MB) — no separate
+        init required.
+      </p>
       <pre><code>BASELINE_BIN=/opt/pg-baseline/bin
 WET_BIN=/opt/pg-wet/bin
 
-# W1: scale=100 — run with shared_buffers=8GB
+# W1: scale=100, run with shared_buffers=8GB
 $BASELINE_BIN/pgbench -p 5440 -i -s 100 --no-vacuum postgres
 $WET_BIN/pgbench    -p 5441 -i -s 100 --no-vacuum postgres
 
-# W2: scale=400 — re-initialize, run with shared_buffers=256MB
+# W2 + W3: scale=400, run with shared_buffers=256MB
+# (W3 rate-limited uses the same dataset; no separate init)
 $BASELINE_BIN/pgbench -p 5440 -i -s 400 --no-vacuum postgres
-$WET_BIN/pgbench    -p 5441 -i -s 400 --no-vacuum postgres
-
-# W3: scale=200 — re-initialize, run with shared_buffers=2GB
-$BASELINE_BIN/pgbench -p 5440 -i -s 200 --no-vacuum postgres
-$WET_BIN/pgbench    -p 5441 -i -s 200 --no-vacuum postgres</code></pre>
+$WET_BIN/pgbench    -p 5441 -i -s 400 --no-vacuum postgres</code></pre>
 
       <h3>Step 1 — Per-round startup sequence</h3>
       <p>
@@ -1097,68 +1064,89 @@ su - pgbench -c "/opt/pg-wet/bin/psql -p 5441 -t \
   -c 'SHOW wait_event_capture;' postgres"</code></pre>
 
       <h3>Step 2 — pgbench invocations</h3>
+      <p>
+        All workloads use the same base flags: <code>-S -c 16 -j 16 -T 180 -P 15 -r -n</code>.
+        Rationale: <code>-c 16 -j 16</code> matches clients and worker threads to the 16
+        dedicated vCPUs, avoiding pgbench oversubscription when co-located with Postgres;
+        <code>-T 180</code> (3 min) for stable numbers; <code>-P 15</code> for 15s progress
+        intervals to confirm steady-state; <code>-r</code> for per-statement latency in the
+        summary; <code>-n</code> skips vacuum.
+      </p>
 
-      <h4>W1 — Read-only cached</h4>
+      <h4>W1 — Read-only cached (stress, TPS)</h4>
       <pre><code># shared_buffers=8GB, scale=100, data ~1.6 GB fits in buffer pool
-# Rung 1 (vanilla baseline, port 5440):
+# Variant: vanilla baseline (port 5440):
 su - pgbench -c "/opt/pg-baseline/bin/pgbench \
-  -p 5440 -S -c 16 -j 16 -T 60 -n --no-vacuum postgres"
+  -p 5440 -S -c 16 -j 16 -T 180 -P 15 -r -n postgres"
 
-# Rungs 3-5 (wet cluster, port 5441 — wait_event_capture set before start):
+# Variants: off / stats / trace (wet cluster, port 5441 — capture set before start):
 su - pgbench -c "/opt/pg-wet/bin/pgbench \
-  -p 5441 -S -c 16 -j 16 -T 60 -n --no-vacuum postgres"</code></pre>
+  -p 5441 -S -c 16 -j 16 -T 180 -P 15 -r -n postgres"</code></pre>
 
-      <h4>W2 — Wait-saturated (key test)</h4>
+      <h4>W2 — Wait-saturated (stress, TPS)</h4>
       <pre><code># shared_buffers=256MB, scale=400, data ~6.4 GB >> buffer pool
-# Rung 1 (vanilla baseline, port 5440):
+# Variant: vanilla baseline (port 5440):
 su - pgbench -c "/opt/pg-baseline/bin/pgbench \
-  -p 5440 -S -c 32 -j 16 -T 60 -n --no-vacuum postgres"
+  -p 5440 -S -c 16 -j 16 -T 180 -P 15 -r -n postgres"
 
-# Rungs 3-5 (wet cluster, port 5441):
+# Variants: off / stats / trace (wet cluster, port 5441):
 su - pgbench -c "/opt/pg-wet/bin/pgbench \
-  -p 5441 -S -c 32 -j 16 -T 60 -n --no-vacuum postgres"</code></pre>
+  -p 5441 -S -c 16 -j 16 -T 180 -P 15 -r -n postgres"</code></pre>
 
-      <h4>W3 — TPC-B read-write</h4>
-      <pre><code># shared_buffers=2GB, scale=200, default TPC-B script (no -S)
-# Rung 1 (vanilla baseline, port 5440):
+      <h4>W3 — Latency at 50% capacity (rate-limited)</h4>
+      <pre><code># Same dataset as W2 (scale=400, shared_buffers=256MB).
+# RATE = 50% of W2 baseline median TPS (filled after W2 stress runs).
+# Metric: avg / p95 / p99 latency from pgbench -r output.
+RATE=&lt;50%-of-W2-baseline-TPS&gt;   # e.g. 4500 if W2 baseline = ~9000 TPS
+
+# Variant: vanilla baseline (port 5440):
 su - pgbench -c "/opt/pg-baseline/bin/pgbench \
-  -p 5440 -c 32 -j 16 -T 60 -n --no-vacuum postgres"
+  -p 5440 -S -c 16 -j 16 -T 180 -P 15 -r -n -R $RATE postgres"
 
-# Rungs 3-5 (wet cluster, port 5441):
+# Variants: off / stats / trace (wet cluster, port 5441):
 su - pgbench -c "/opt/pg-wet/bin/pgbench \
-  -p 5441 -c 32 -j 16 -T 60 -n --no-vacuum postgres"</code></pre>
+  -p 5441 -S -c 16 -j 16 -T 180 -P 15 -r -n -R $RATE postgres"</code></pre>
 
       <h3>Step 3 — capture level changes between variants</h3>
       <p>
-        <code>wait_event_capture</code> is set by rewriting <code>postgresql.conf</code> and
-        restarting the cluster (full stop/start cycle), not by a live <code>ALTER SYSTEM</code>.
-        This ensures a clean server state between variants and avoids any residual DSA ring
-        state from a previous <code>trace</code> run.
+        <code>wait_event_capture</code> is changed by rewriting <code>postgresql.conf</code> and
+        doing a full stop/start cycle — not a live <code>ALTER SYSTEM</code>. This guarantees
+        a clean server state and eliminates residual DSA ring state from a prior <code>trace</code>
+        run.
       </p>
-      <pre><code># Sequence within one round for W2:
-# --- variant: off ---
-# (set shared_buffers=256MB, wait_event_capture=off, restart wet cluster)
-pgbench -p 5441 -S -c 32 -j 16 -T 60 -n --no-vacuum postgres
+      <pre><code># Sequence within one round (W2 example, same pattern for W1 and W3):
+
+# --- variant: baseline (separate binary, port 5440) ---
+# (set shared_buffers=256MB on baseline cluster, start it)
+su - pgbench -c "/opt/pg-baseline/bin/pgbench \
+  -p 5440 -S -c 16 -j 16 -T 180 -P 15 -r -n postgres"
+
+# --- variant: off (wet binary, port 5441) ---
+# (set shared_buffers=256MB, wait_event_capture=off, start wet cluster)
+su - pgbench -c "/opt/pg-wet/bin/pgbench \
+  -p 5441 -S -c 16 -j 16 -T 180 -P 15 -r -n postgres"
 
 # --- variant: stats ---
-# (set wait_event_capture=stats, restart)
-pgbench -p 5441 -S -c 32 -j 16 -T 60 -n --no-vacuum postgres
+# (set wait_event_capture=stats, restart wet cluster)
+su - pgbench -c "/opt/pg-wet/bin/pgbench \
+  -p 5441 -S -c 16 -j 16 -T 180 -P 15 -r -n postgres"
 
 # --- variant: trace ---
-# (set wait_event_capture=trace, restart)
-pgbench -p 5441 -S -c 32 -j 16 -T 60 -n --no-vacuum postgres</code></pre>
+# (set wait_event_capture=trace, restart wet cluster)
+su - pgbench -c "/opt/pg-wet/bin/pgbench \
+  -p 5441 -S -c 16 -j 16 -T 180 -P 15 -r -n postgres"</code></pre>
 
       <h3>Step 4 — W2 wait-event proof queries (run during load)</h3>
       <pre><code># Reset stats counters before the evidence-collection run:
 su - pgbench -c "/opt/pg-wet/bin/psql -p 5441 \
   -c 'SELECT pg_stat_reset_wait_event_timing_all();' postgres"
 
-# Start a 30s load run in background, sample midway:
+# Start a 180s load run in background, sample midway:
 su - pgbench -c "/opt/pg-wet/bin/pgbench \
-  -p 5441 -S -c 32 -j 16 -T 30 -n --no-vacuum postgres" &
-sleep 15
+  -p 5441 -S -c 16 -j 16 -T 180 -P 15 -r -n postgres" &
+sleep 90
 
-# CPU idle% (low = IO/wait bound):
+# CPU idle% (high idle% = IO/wait bound, not CPU-bound):
 vmstat 1 5
 
 # Active waits from pg_stat_activity:
@@ -1184,29 +1172,9 @@ wait   # let pgbench finish
   ORDER BY total_count DESC
   LIMIT 10;"
 
-# Total wait transitions in ~30s:
+# Total wait transitions in the 180s run:
 /opt/pg-wet/bin/psql -p 5441 -t postgres -c \
   "SELECT sum(count) FROM pg_stat_wait_event_timing;"</code></pre>
-
-      <h3>Rate-limited mode (planned — not yet run)</h3>
-      <p>
-        Once baseline TPS is established from the stress runs, a second pass will use
-        <code>pgbench --rate</code> at approximately 50% of that TPS to measure per-transaction
-        latency overhead without saturating the server. Metrics: p95/p99 latency.
-      </p>
-      <pre><code># Example — set --rate to ~50% of observed W2 stress TPS
-# (replace HALF_TPS with the actual computed value)
-HALF_TPS=5000   # placeholder — derive from stress results
-
-# Rung 1 (baseline):
-su - pgbench -c "/opt/pg-baseline/bin/pgbench \
-  -p 5440 -S -c 32 -j 16 -T 60 -n --no-vacuum \
-  --rate=$HALF_TPS --latency-limit=1000 postgres"
-
-# Rungs 3-5 (wet, capture=off/stats/trace):
-su - pgbench -c "/opt/pg-wet/bin/pgbench \
-  -p 5441 -S -c 32 -j 16 -T 60 -n --no-vacuum \
-  --rate=$HALF_TPS --latency-limit=1000 postgres"</code></pre>
     </section>
 
     <!-- Open questions -->
@@ -1220,9 +1188,9 @@ su - pgbench -c "/opt/pg-wet/bin/pgbench \
           structural changes in the patch.
         </li>
         <li>
-          <strong>50%-capacity latency pass</strong> — rate-limited mode is not yet run.
-          This is required to characterize latency overhead in production-like conditions
-          (see Section 6).
+          <strong>W3 rate derivation</strong> — the <code>-R</code> value for W3 is computed
+          after W2 stress runs complete (50% of W2 baseline median TPS). Confirm the server
+          is not saturated at that rate (CPU idle &gt; 30%) before accepting W3 latency numbers.
         </li>
         <li>
           <strong>Reset/observer-effect microbenchmark</strong> — sweep reset frequency
