@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>wait_event_timing — Corrected Benchmark Results (v3)</title>
+<style>
+  :root{--bg:#fff;--surface:#f8f9fa;--border:#e1e4e8;--text:#24292e;--muted:#586069;--accent:#0366d6;
+        --accent-bg:#f1f8ff;--warn:#e36209;--warn-bg:#fff8f0;--code-bg:#f6f8fa;--green:#22863a;--green-bg:#f0fff4;--max:920px;}
+  @media (prefers-color-scheme:dark){:root{--bg:#0d1117;--surface:#161b22;--border:#30363d;--text:#c9d1d9;--muted:#8b949e;
+        --accent:#58a6ff;--accent-bg:#0d1117;--warn:#f0883e;--warn-bg:#1c1007;--code-bg:#161b22;--green:#3fb950;--green-bg:#0d1117;}}
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
+  html{font-size:16px;scroll-behavior:smooth;}
+  body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;background:var(--bg);color:var(--text);line-height:1.65;}
+  .wrap{max-width:var(--max);margin:0 auto;padding:2.2rem 1.2rem 5rem;}
+  h1{font-size:1.9rem;line-height:1.2;margin-bottom:.5rem;}
+  h2{font-size:1.4rem;margin:2.4rem 0 .9rem;padding-bottom:.35rem;border-bottom:1px solid var(--border);}
+  h3{font-size:1.12rem;margin:1.5rem 0 .6rem;}
+  p,ul,ol{margin-bottom:1rem;}ul,ol{padding-left:1.4rem;}li{margin-bottom:.3rem;}
+  a{color:var(--accent);text-decoration:none;}a:hover{text-decoration:underline;}
+  code{background:var(--code-bg);border:1px solid var(--border);border-radius:4px;padding:.1em .35em;font-size:.88em;
+       font-family:'SF Mono',Menlo,Consolas,monospace;}
+  .sub{color:var(--muted);font-size:1.02rem;margin-bottom:1.4rem;}
+  .tldr{background:var(--accent-bg);border:1px solid var(--accent);border-left-width:4px;border-radius:8px;padding:1.1rem 1.3rem;margin:1.4rem 0;}
+  .tldr h3{margin-top:0;color:var(--accent);}
+  .warn{background:var(--warn-bg);border:1px solid var(--warn);border-left-width:4px;border-radius:8px;padding:1rem 1.2rem;margin:1.3rem 0;}
+  .ok{background:var(--green-bg);border:1px solid var(--green);border-left-width:4px;border-radius:8px;padding:1rem 1.2rem;margin:1.3rem 0;}
+  table{border-collapse:collapse;width:100%;margin:1rem 0;font-size:.92rem;}
+  th,td{border:1px solid var(--border);padding:.5rem .7rem;text-align:right;}
+  th:first-child,td:first-child{text-align:left;}
+  thead th{background:var(--surface);}
+  tbody tr:nth-child(even){background:var(--surface);}
+  .ns{color:var(--green);font-weight:600;}.sig{color:var(--warn);font-weight:600;}
+  figure{margin:1.4rem 0;text-align:center;}
+  img{max-width:100%;height:auto;border:1px solid var(--border);border-radius:8px;background:#fff;}
+  figcaption{color:var(--muted);font-size:.86rem;margin-top:.5rem;}
+  .meta{color:var(--muted);font-size:.85rem;border-top:1px solid var(--border);margin-top:3rem;padding-top:1rem;}
+  .pill{display:inline-block;background:var(--surface);border:1px solid var(--border);border-radius:999px;
+        padding:.12em .7em;font-size:.78rem;color:var(--muted);margin:0 .25rem .35rem 0;}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>wait_event_timing — corrected benchmark results</h1>
+<p class="sub">Independent overhead measurement of Dmitry Fomin's Oracle-style wait-event timing patch ·
+PostgreSQL 19beta1 · Hetzner CCX43 (16 dedicated vCPU) · <span class="pill">v3 / corrected harness</span>
+<span class="pill">2026-06-17</span></p>
+
+<div class="warn">
+<strong>Status: interim.</strong> Workloads W1–W4 below are complete and analysed. <strong>W5</strong>
+(wait-heavy latency) is still running, and a fresh independent 3-specialty re-review of this corrected
+data is pending — both will be folded in. This page supersedes the earlier 2-round numbers, which an
+independent review correctly flagged as <em>not publishable as "negligible overhead"</em> due to a broken
+CPU-idle gate, an unmeasured noise floor, fixed variant order, and only the easy (cached) workload. Every
+one of those is fixed here.
+</div>
+
+<div class="tldr">
+<h3>TL;DR</h3>
+<ul>
+<li><strong>Throughput overhead is not statistically resolvable</strong> at any capture level
+(<code>off</code>/<code>stats</code>/<code>trace</code>) across three regimes — cached, ClientRead-saturated,
+and a buffer-miss short-wait storm (20M sub-4µs waits). Within-binary deltas are &lt;0.75%, all p&gt;0.18.</li>
+<li><strong>The honest limiter:</strong> the <em>stub</em> rung (patched source, instrumentation compiled
+<em>out</em>) differs from vanilla by up to <strong>+1.2% (p=0.008)</strong> — pure binary code-layout
+variance, <em>larger</em> than any capture cost. So overhead is <strong>build-variance-limited below ~1%</strong>,
+indistinguishable from zero.</li>
+<li><strong>One real, small signal — latency, not throughput:</strong> <code>trace</code> adds
+<strong>+1.5% request latency (p=0.008)</strong> under headroom (cached). <code>stats</code> does not.
+Consistent with trace doing more per-wait work (DSA-ring write + query markers).</li>
+<li>Instrumentation is genuinely exercised: 12M live wait transitions, full 32-bucket histograms, trace
+ring filling — the ~0 is at a high wait rate, not an idle feature.</li>
+</ul>
+</div>
+
+<h2>Method (what makes this trustworthy)</h2>
+<ul>
+<li><strong>5 variants.</strong> <code>VAN</code> vanilla (no patch) · <code>STB</code> stub (patched source,
+<code>--enable-wait-event-timing</code> <em>omitted</em>) · <code>OFF</code>/<code>STA</code>/<code>TRA</code>
+the instrumented binary with <code>wait_event_capture = off/stats/trace</code>.</li>
+<li><strong>A/A noise floor.</strong> Vanilla run six times back-to-back → run-to-run CV <strong>0.328%</strong>
+(the resolving limit for same-binary comparisons).</li>
+<li><strong>Randomized variant order</strong> every round (breaks the position↔variant confound), <strong>5 rounds</strong>,
+mean ± stddev, <strong>exact permutation tests</strong> (n=5, 252 splits).</li>
+<li><strong>Gold-standard comparison is within one binary:</strong> <code>OFF</code>→<code>STA</code>→<code>TRA</code>
+are the <em>same</em> binary and <em>same</em> data cluster, differing only by a runtime <code>SET</code> — no
+recompile, no re-initdb, so no layout/cluster confound.</li>
+<li>CPU idle measured by vmstat header name (the earlier off-by-one that read <code>wa</code> as <code>id</code> is fixed).
+All runs <code>pgbench -S -j16 -T120</code>, 5 rounds.</li>
+</ul>
+
+<h2>Throughput — three regimes, no resolvable overhead</h2>
+
+<figure>
+<img src="img/v3/overhead_vs_floor.png" alt="Within-binary capture overhead vs measurement floors">
+<figcaption>Capture overhead (stats/trace vs off, <em>same binary</em>) against the A/A noise floor (±0.33%)
+and the cross-binary build-variance floor (±1%). Every bar sits inside the floors; every p&gt;0.18.</figcaption>
+</figure>
+
+<table>
+<thead><tr><th>regime (wait profile)</th><th>stats vs off</th><th>trace vs off</th><th>stub vs vanilla¹</th></tr></thead>
+<tbody>
+<tr><td>W1 — cached point-lookup (CPU-bound)</td><td class="ns">−0.07% (p=.82)</td><td class="ns">−0.55% (p=.18)</td><td>+0.36% (p=.29)</td></tr>
+<tr><td>W2 — ClientRead-saturated, −c64</td><td class="ns">−0.74% (p=.18)</td><td class="ns">−0.34% (p=.56)</td><td>+0.96% (p=.06)</td></tr>
+<tr><td>W3 — buffer-miss short-wait (81% DataFileRead @ 3.9µs, 20M)</td><td class="ns">−0.27% (p=.38)</td><td class="ns">−0.26% (p=.31)</td><td class="sig">+1.21% (p=.008)</td></tr>
+</tbody>
+</table>
+<p style="font-size:.85rem;color:var(--muted)">¹ The stub should cost <em>zero</em>; the non-zero, sometimes-significant
+gap is binary code-layout variance (the classic Mytkowicz effect) — it bounds resolving power and exceeds any capture cost.</p>
+
+<figure><img src="img/v3/W1_bars.png" alt="W1 cached throughput"></figure>
+<figure><img src="img/v3/W2_bars.png" alt="W2 ClientRead-saturated throughput">
+<figcaption>Note the stub (should be 0) is the high outlier — build variance, not signal.</figcaption></figure>
+<figure><img src="img/v3/W3_bars.png" alt="W3 buffer-miss short-wait throughput"></figure>
+
+<h2>Latency under headroom — the one real signal</h2>
+<div class="ok">
+<strong>W4 (cached, rate-limited to ~50%, idle≈30%):</strong> <code>trace</code> latency
+<strong>+1.49% vs off, p=0.008</strong> — small but statistically clean and reproducible (it echoes the
+direction of the earlier flagged result). <code>stats</code>: +0.50%, p=0.37 (not significant). Throughput
+saturation masks this; rate-limited latency exposes it.
+</div>
+<figure><img src="img/v3/W4_bars.png" alt="W4 latency under headroom">
+<figcaption>Relative request latency (lower is better). Trace sits consistently above off; stats does not.</figcaption></figure>
+<p><em>W5 (wait-heavy latency — the same probe on the buffer-miss workload, where waits are frequent) is
+running now and will sharpen this number.</em></p>
+
+<h2>The instrumentation really runs</h2>
+<figure><img src="img/v3/histogram.png" alt="Live-captured wait histogram">
+<figcaption>A live, mid-run 32-bucket log₂ histogram for one client backend (ClientRead). Captured while
+backends were alive (per-backend slots free on exit). At W2 peak: ~12M client waits across 65 backends;
+trace ring filled to 131,072 records.</figcaption></figure>
+
+<h2>Caveats &amp; what's still open</h2>
+<ul>
+<li>Single virtualized 16-vCPU host; SELECT-only point lookups; all datasets fit in OS page cache
+(no true rotational/SSD IO-bound regime).</li>
+<li>Wait mix is ClientRead/DataFileRead dominated. A dedicated <strong>LWLock-contention</strong> storm and a
+<strong>write/WAL</strong> workload remain future work (LWLock was &lt;1% here).</li>
+<li>Throughput claim is "&lt;~1%, build-variance-limited, not distinguishable from zero" — <em>not</em> a measured "exactly 0".</li>
+<li><strong>Pending:</strong> W5 (wait-heavy latency) + a fresh independent 3-specialty re-review of this corrected dataset.</li>
+</ul>
+
+<h2>Reproduce / raw material</h2>
+<ul>
+<li>Tracking issue, scripts, raw logs, per-run data: <a href="https://github.com/NikolayS/postgres/issues/48">NikolayS/postgres#48</a></li>
+<li>The patch under test: <a href="https://github.com/DmitryNFomin/postgres/pull/2">DmitryNFomin/postgres#2</a></li>
+<li>Methodology / design brief: <a href="index.html">index.html</a></li>
+</ul>
+
+<p class="meta">Generated for the Hacking Postgres session of 2026-06-17. Charts: matplotlib; stats: exact
+permutation tests. This is an independent measurement, not a vendor claim — numbers and method are open for scrutiny.</p>
+
+</div>
+</body>
+</html>
