@@ -138,13 +138,15 @@ not depend on it: the same-binary <code>OFF/STA/TRA</code> comparison has no suc
 <figure><img src="img/v3/latency_bars.png" alt="Latency: trace +1.5%, stats neutral"></figure>
 
 <h3>Mechanism — an honest open question</h3>
-<p>Percentiles say the trace cost is <strong>not</strong> tail jitter: the <em>median</em> shifts +5µs, p95 +22µs,
-p99 +27µs — the whole distribution moves. But it is also <strong>not</strong> a simple per-query CPU cost: +5.6µs
-on a cached transaction would be ~7% of throughput at saturation, yet measured throughput moves &lt;0.55% (and W3's
-20M waits/run bound any per-wait CPU cost to &lt;0.5µs). A cost that shows in latency-under-headroom but not in
-saturated throughput is genuinely puzzling and <strong>not explained by this data</strong> — the earlier
-“DSA-ring-write per wait” wording was wrong and is removed. Resolving it needs <code>perf</code> profiling of the
-trace path; that is future work.</p>
+<p>Percentiles say the trace cost is <strong>not</strong> tail jitter: the <em>median</em> shifts +5µs
+(mean +5.6µs), p95 +22µs, p99 +27µs — the whole distribution moves. But it is also <strong>not</strong> a simple
+per-transaction CPU cost. The +5.6µs is +1.5% of the ~373µs <em>end-to-end</em> latency (dominated by the client
+round-trip at <code>-c16</code>), but it is ~7.6% of the <strong>~74µs of actual CPU-time per transaction</strong>
+at saturation (16 cores ÷ 217k tps). If trace spent +5.6µs of CPU per transaction, throughput would fall ~7% — yet
+measured throughput moves &lt;0.55% (and W3's 20M waits/run independently bound any per-wait CPU cost to &lt;0.5µs).
+A cost that appears in latency-under-headroom but leaves saturated throughput untouched is genuinely puzzling and
+<strong>not explained by this data</strong> — the earlier “DSA-ring-write per wait” wording was wrong and is removed.
+Resolving it needs <code>perf</code> profiling of the trace path; that is future work.</p>
 <figure><img src="img/v3/percentiles.png" alt="Latency percentiles OFF/STA/TRA">
 <figcaption>Trace shifts the whole distribution (median through p99); stats overlaps off. 2% pgbench sampling,
 ~260k transactions/run.</figcaption></figure>
