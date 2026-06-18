@@ -15,17 +15,16 @@
   .wrap{max-width:var(--max);margin:0 auto;padding:2.2rem 1.2rem 5rem;}
   h1{font-size:1.9rem;line-height:1.2;margin-bottom:.5rem;}
   h2{font-size:1.4rem;margin:2.4rem 0 .9rem;padding-bottom:.35rem;border-bottom:1px solid var(--border);}
-  h3{font-size:1.12rem;margin:1.5rem 0 .6rem;}
+  h3{font-size:1.1rem;margin:1.4rem 0 .5rem;}
   p,ul,ol{margin-bottom:1rem;}ul,ol{padding-left:1.4rem;}li{margin-bottom:.3rem;}
   a{color:var(--accent);text-decoration:none;}a:hover{text-decoration:underline;}
-  code{background:var(--code-bg);border:1px solid var(--border);border-radius:4px;padding:.1em .35em;font-size:.88em;
-       font-family:'SF Mono',Menlo,Consolas,monospace;}
+  code{background:var(--code-bg);border:1px solid var(--border);border-radius:4px;padding:.1em .35em;font-size:.88em;font-family:'SF Mono',Menlo,Consolas,monospace;}
   .sub{color:var(--muted);font-size:1.02rem;margin-bottom:1.4rem;}
   .tldr{background:var(--accent-bg);border:1px solid var(--accent);border-left-width:4px;border-radius:8px;padding:1.1rem 1.3rem;margin:1.4rem 0;}
   .tldr h3{margin-top:0;color:var(--accent);}
   .warn{background:var(--warn-bg);border:1px solid var(--warn);border-left-width:4px;border-radius:8px;padding:1rem 1.2rem;margin:1.3rem 0;}
   .ok{background:var(--green-bg);border:1px solid var(--green);border-left-width:4px;border-radius:8px;padding:1rem 1.2rem;margin:1.3rem 0;}
-  table{border-collapse:collapse;width:100%;margin:1rem 0;font-size:.92rem;}
+  table{border-collapse:collapse;width:100%;margin:1rem 0;font-size:.9rem;}
   th,td{border:1px solid var(--border);padding:.5rem .7rem;text-align:right;}
   th:first-child,td:first-child{text-align:left;}
   thead th{background:var(--surface);}
@@ -35,8 +34,8 @@
   img{max-width:100%;height:auto;border:1px solid var(--border);border-radius:8px;background:#fff;}
   figcaption{color:var(--muted);font-size:.86rem;margin-top:.5rem;}
   .meta{color:var(--muted);font-size:.85rem;border-top:1px solid var(--border);margin-top:3rem;padding-top:1rem;}
-  .pill{display:inline-block;background:var(--surface);border:1px solid var(--border);border-radius:999px;
-        padding:.12em .7em;font-size:.78rem;color:var(--muted);margin:0 .25rem .35rem 0;}
+  .pill{display:inline-block;background:var(--surface);border:1px solid var(--border);border-radius:999px;padding:.12em .7em;font-size:.78rem;color:var(--muted);margin:0 .25rem .35rem 0;}
+  .fn{font-size:.84rem;color:var(--muted);}
 </style>
 </head>
 <body>
@@ -44,113 +43,136 @@
 
 <h1>wait_event_timing — corrected benchmark results</h1>
 <p class="sub">Independent overhead measurement of Dmitry Fomin's Oracle-style wait-event timing patch ·
-PostgreSQL 19beta1 · Hetzner CCX43 (16 dedicated vCPU) · <span class="pill">v3 / corrected harness</span>
-<span class="pill">2026-06-17</span></p>
+PostgreSQL 19beta1 · Hetzner CCX43 (16 dedicated vCPU) ·
+<span class="pill">v3 — reviewer-corrected</span><span class="pill">2026-06-17</span></p>
 
-<div class="warn">
-<strong>Status: interim.</strong> Workloads W1–W4 below are complete and analysed. <strong>W5</strong>
-(wait-heavy latency) is still running, and a fresh independent 3-specialty re-review of this corrected
-data is pending — both will be folded in. This page supersedes the earlier 2-round numbers, which an
-independent review correctly flagged as <em>not publishable as "negligible overhead"</em> due to a broken
-CPU-idle gate, an unmeasured noise floor, fixed variant order, and only the easy (cached) workload. Every
-one of those is fixed here.
+<div class="ok">
+<strong>Two independent review rounds applied.</strong> The first review rejected the original 2-round numbers
+(broken CPU-idle gate, unmeasured noise floor, fixed variant order, easy workload only). The corrected harness
+below fixed all of that. A <em>second</em> 3-specialty review then caught a real statistical error in the
+interim page — the latency significance test was wrong — and <strong>this page applies all six of its fixes</strong>:
+the design-correct paired test, multiple-comparison accounting, an honest one-sided framing of the throughput
+result, a hypothesis (not fact) framing of the stub effect, latency percentiles, and removal of an unsupported
+mechanism claim.
 </div>
 
 <div class="tldr">
 <h3>TL;DR</h3>
 <ul>
-<li><strong>Throughput overhead is not statistically resolvable</strong> at any capture level
-(<code>off</code>/<code>stats</code>/<code>trace</code>) across three regimes — cached, ClientRead-saturated,
-and a buffer-miss short-wait storm (20M sub-4µs waits). Within-binary deltas are &lt;0.75%, all p&gt;0.18.</li>
-<li><strong>The honest limiter:</strong> the <em>stub</em> rung (patched source, instrumentation compiled
-<em>out</em>) differs from vanilla by up to <strong>+1.2% (p=0.008)</strong> — pure binary code-layout
-variance, <em>larger</em> than any capture cost. So overhead is <strong>build-variance-limited below ~1%</strong>,
-indistinguishable from zero.</li>
-<li><strong>One real, small signal — latency, not throughput:</strong> <code>trace</code> adds
-<strong>+1.5% request latency (p=0.008)</strong> under headroom (cached). <code>stats</code> does not.
-Consistent with trace doing more per-wait work (DSA-ring write + query markers).</li>
-<li>Instrumentation is genuinely exercised: 12M live wait transitions, full 32-bucket histograms, trace
-ring filling — the ~0 is at a high wait rate, not an idle feature.</li>
+<li><strong>Throughput: no resolvable overhead, any capture mode</strong> — across cached, ClientRead-saturated,
+and buffer-miss short-wait (20M sub-4µs waits) regimes. Honest framing: a consistent <em>small cost direction</em>
+(all 6 within-binary deltas negative, sign-test p=0.031) with point estimates <strong>≤0.75%</strong>, an upper
+bound below the measurement floor — <em>not</em> a measured zero.</li>
+<li><strong>Latency: <code>trace</code> adds a small, real ~1.5%; <code>stats</code> is free.</strong> With the
+design-correct paired test over n=10 cached rounds, trace latency is +5.6µs (+1.5%), positive in 10/10 rounds,
+<strong>p=0.002</strong> — the one effect that survives multiple-comparison correction. <code>stats</code> is
+latency-neutral (+0.7µs, p=0.53).</li>
+<li><strong>The trace cost is an open puzzle, not an explained mechanism.</strong> It shifts the whole latency
+distribution (median +5µs, p99 +27µs) yet leaves throughput untouched — a per-query CPU cost that size would
+have cut throughput ~7% at saturation, but throughput moves &lt;0.55%. Mechanism unresolved; needs profiling.</li>
+<li>The patched binary with capture <em>off</em> is free; the <strong>stub</strong> control suggests cross-binary
+build variance (~1%) that bounds resolving power — though, honestly, a systematic stub advantage can't be fully
+excluded at this sample size.</li>
 </ul>
 </div>
 
-<h2>Method (what makes this trustworthy)</h2>
+<h2>Method &amp; how every p-value is computed</h2>
 <ul>
 <li><strong>5 variants.</strong> <code>VAN</code> vanilla (no patch) · <code>STB</code> stub (patched source,
 <code>--enable-wait-event-timing</code> <em>omitted</em>) · <code>OFF</code>/<code>STA</code>/<code>TRA</code>
 the instrumented binary with <code>wait_event_capture = off/stats/trace</code>.</li>
-<li><strong>A/A noise floor.</strong> Vanilla run six times back-to-back → run-to-run CV <strong>0.328%</strong>
-(the resolving limit for same-binary comparisons).</li>
-<li><strong>Randomized variant order</strong> every round (breaks the position↔variant confound), <strong>5 rounds</strong>,
-mean ± stddev, <strong>exact permutation tests</strong> (n=5, 252 splits).</li>
 <li><strong>Gold-standard comparison is within one binary:</strong> <code>OFF</code>→<code>STA</code>→<code>TRA</code>
 are the <em>same</em> binary and <em>same</em> data cluster, differing only by a runtime <code>SET</code> — no
-recompile, no re-initdb, so no layout/cluster confound.</li>
-<li>CPU idle measured by vmstat header name (the earlier off-by-one that read <code>wa</code> as <code>id</code> is fixed).
-All runs <code>pgbench -S -j16 -T120</code>, 5 rounds.</li>
+recompile, no re-initdb, so no code-layout or cluster confound.</li>
+<li><strong>Design = randomized block.</strong> Each round runs all variants once in randomized order; rounds are
+blocks (they absorb host drift). The correct test is therefore the <strong>paired within-round sign-flip
+permutation test</strong> — <em>every p on this page is that test.</em> (The first cut of this page mistakenly used
+an unblocked two-sample test, whose n=5 floor of 2/252≈0.008 manufactured false significance.)</li>
+<li><strong>Multiple comparisons.</strong> ~12 primary comparisons; Bonferroni α≈0.05/12≈0.004. At n=5 the paired
+test's own floor is 2/32=0.0625, so <em>nothing at n=5 can clear correction</em> — which is why the one real claim
+(trace latency) was re-run to <strong>n=10</strong> (paired floor 2/1024≈0.002).</li>
+<li><strong>Noise floor.</strong> A/A (vanilla ×6, same binary+cluster) CV=0.328% — a best-case lower bound;
+real interleaved same-binary CVs ran 0.4–1.0%, which only reinforces the “sub-1%, build-variance-limited” framing.</li>
+<li>CPU idle measured by vmstat header name (the original off-by-one is fixed). pgbench <code>-S</code>, 5 rounds
+each (latency re-tested at 10), <code>-T120</code>.</li>
 </ul>
 
-<h2>Throughput — three regimes, no resolvable overhead</h2>
-
+<h2>Throughput — no resolvable overhead (3 regimes)</h2>
 <figure>
-<img src="img/v3/overhead_vs_floor.png" alt="Within-binary capture overhead vs measurement floors">
-<figcaption>Capture overhead (stats/trace vs off, <em>same binary</em>) against the A/A noise floor (±0.33%)
-and the cross-binary build-variance floor (±1%). Every bar sits inside the floors; every p&gt;0.18.</figcaption>
+<img src="img/v3/overhead_vs_floor.png" alt="Throughput capture cost vs floors (paired test)">
+<figcaption>Within-binary capture cost (paired test) against the A/A floor (±0.33%) and the cross-binary
+build-variance floor (~1%). Every bar is inside the floors; no paired p&lt;0.18.</figcaption>
 </figure>
 
 <table>
 <thead><tr><th>regime (wait profile)</th><th>stats vs off</th><th>trace vs off</th><th>stub vs vanilla¹</th></tr></thead>
 <tbody>
-<tr><td>W1 — cached point-lookup (CPU-bound)</td><td class="ns">−0.07% (p=.82)</td><td class="ns">−0.55% (p=.18)</td><td>+0.36% (p=.29)</td></tr>
-<tr><td>W2 — ClientRead-saturated, −c64</td><td class="ns">−0.74% (p=.18)</td><td class="ns">−0.34% (p=.56)</td><td>+0.96% (p=.06)</td></tr>
-<tr><td>W3 — buffer-miss short-wait (81% DataFileRead @ 3.9µs, 20M)</td><td class="ns">−0.27% (p=.38)</td><td class="ns">−0.26% (p=.31)</td><td class="sig">+1.21% (p=.008)</td></tr>
+<tr><td>W1 cached point-lookup (CPU-bound)</td><td class="ns">−0.07% (p=.81)</td><td class="ns">−0.55% (p=.25)</td><td>+0.36%</td></tr>
+<tr><td>W2 ClientRead-saturated (−c64)</td><td class="ns">−0.74% (p=.25)</td><td class="ns">−0.34% (p=.56)</td><td>+0.96%</td></tr>
+<tr><td>W3 buffer-miss short-wait (81% DataFileRead @3.9µs, 20M)</td><td class="ns">−0.27% (p=.38)</td><td class="ns">−0.26% (p=.38)</td><td>+1.21%</td></tr>
 </tbody>
 </table>
-<p style="font-size:.85rem;color:var(--muted)">¹ The stub should cost <em>zero</em>; the non-zero, sometimes-significant
-gap is binary code-layout variance (the classic Mytkowicz effect) — it bounds resolving power and exceeds any capture cost.</p>
+<p>No individual capture comparison is statistically significant (all paired p≥0.25). But note the <strong>direction
+is consistent</strong>: all six within-binary deltas are negative (capture slightly slower), a 6/6 sign pattern
+(sign-test two-sided p=0.031). So the honest statement is a <strong>one-sided upper bound — overhead is small and
+positive in direction, ≤0.75%, below our resolving power</strong> — rather than “indistinguishable from zero,”
+which would wrongly imply capture could be free-or-faster with equal likelihood.</p>
+<p class="fn">¹ <strong>Stub caveat (hypothesis, not conclusion).</strong> The stub should cost zero, yet it is the
+<em>fastest of all five variants in all three workloads</em> (P=(1/5)³=0.008 under pure noise; per-workload paired
+p as low as 0.06). The most likely explanation is binary code-layout variance (the Mytkowicz effect), and it bounds
+how finely any cross-binary comparison can resolve — <em>but a systematic stub advantage cannot be fully excluded at
+n=5</em>. Pinning it down would need link-order randomization / LTO-PGO-controlled builds. The clean conclusion does
+not depend on it: the same-binary <code>OFF/STA/TRA</code> comparison has no such confound.</p>
 
-<figure><img src="img/v3/W1_bars.png" alt="W1 cached throughput"></figure>
-<figure><img src="img/v3/W2_bars.png" alt="W2 ClientRead-saturated throughput">
-<figcaption>Note the stub (should be 0) is the high outlier — build variance, not signal.</figcaption></figure>
-<figure><img src="img/v3/W3_bars.png" alt="W3 buffer-miss short-wait throughput"></figure>
+<figure><img src="img/v3/W3_bars.png" alt="W3 buffer-miss throughput"><figcaption>W3 (short-wait storm). The stub
+— which should be zero — is the high outlier; that is the cross-binary variance, not a capture effect.</figcaption></figure>
 
-<h2>Latency under headroom — the one real signal</h2>
+<h2>Latency under headroom — trace adds ~1.5%, stats is free</h2>
 <div class="ok">
-<strong>W4 (cached, rate-limited to ~50%, idle≈30%):</strong> <code>trace</code> latency
-<strong>+1.49% vs off, p=0.008</strong> — small but statistically clean and reproducible (it echoes the
-direction of the earlier flagged result). <code>stats</code>: +0.50%, p=0.37 (not significant). Throughput
-saturation masks this; rate-limited latency exposes it.
+<strong>Re-tested at n=10</strong> (two identical-config cached replicates) with the paired within-round test:
+<code>trace</code> latency is <strong>+5.6µs (+1.5%), positive in 10/10 rounds, p=0.002</strong> — it clears the
+~0.004 Bonferroni bar and is the single effect in the whole study that does. <code>stats</code> is
+<strong>latency-neutral</strong> (+0.7µs, 4/10, p=0.53). A wait-heavy replication (W5) is directionally consistent
+(trace 4/5 rounds).
 </div>
-<figure><img src="img/v3/W4_bars.png" alt="W4 latency under headroom">
-<figcaption>Relative request latency (lower is better). Trace sits consistently above off; stats does not.</figcaption></figure>
-<p><em>W5 (wait-heavy latency — the same probe on the buffer-miss workload, where waits are frequent) is
-running now and will sharpen this number.</em></p>
+<figure><img src="img/v3/latency_bars.png" alt="Latency: trace +1.5%, stats neutral"></figure>
+
+<h3>Mechanism — an honest open question</h3>
+<p>Percentiles say the trace cost is <strong>not</strong> tail jitter: the <em>median</em> shifts +5µs, p95 +22µs,
+p99 +27µs — the whole distribution moves. But it is also <strong>not</strong> a simple per-query CPU cost: +5.6µs
+on a cached transaction would be ~7% of throughput at saturation, yet measured throughput moves &lt;0.55% (and W3's
+20M waits/run bound any per-wait CPU cost to &lt;0.5µs). A cost that shows in latency-under-headroom but not in
+saturated throughput is genuinely puzzling and <strong>not explained by this data</strong> — the earlier
+“DSA-ring-write per wait” wording was wrong and is removed. Resolving it needs <code>perf</code> profiling of the
+trace path; that is future work.</p>
+<figure><img src="img/v3/percentiles.png" alt="Latency percentiles OFF/STA/TRA">
+<figcaption>Trace shifts the whole distribution (median through p99); stats overlaps off. 2% pgbench sampling,
+~260k transactions/run.</figcaption></figure>
 
 <h2>The instrumentation really runs</h2>
 <figure><img src="img/v3/histogram.png" alt="Live-captured wait histogram">
-<figcaption>A live, mid-run 32-bucket log₂ histogram for one client backend (ClientRead). Captured while
-backends were alive (per-backend slots free on exit). At W2 peak: ~12M client waits across 65 backends;
-trace ring filled to 131,072 records.</figcaption></figure>
+<figcaption>Live mid-run 32-bucket log₂ histogram (ClientRead, one client backend). At W2 peak ~12M client waits
+across 65 backends; trace ring filled to 131,072 records; W3 drove ~20M sub-4µs DataFileRead waits/run.</figcaption></figure>
 
 <h2>Caveats &amp; what's still open</h2>
 <ul>
-<li>Single virtualized 16-vCPU host; SELECT-only point lookups; all datasets fit in OS page cache
-(no true rotational/SSD IO-bound regime).</li>
+<li>Single virtualized 16-vCPU host; SELECT-only; all datasets cache-resident (no true rotational/SSD IO-bound regime).</li>
 <li>Wait mix is ClientRead/DataFileRead dominated. A dedicated <strong>LWLock-contention</strong> storm and a
 <strong>write/WAL</strong> workload remain future work (LWLock was &lt;1% here).</li>
-<li>Throughput claim is "&lt;~1%, build-variance-limited, not distinguishable from zero" — <em>not</em> a measured "exactly 0".</li>
-<li><strong>Pending:</strong> W5 (wait-heavy latency) + a fresh independent 3-specialty re-review of this corrected dataset.</li>
+<li>The trace-latency <strong>mechanism is unexplained</strong> (latency cost without throughput cost) — needs perf profiling.</li>
+<li>The stub/build-variance interpretation is a <strong>hypothesis</strong>; a systematic stub advantage isn't fully excluded at n=5.</li>
 </ul>
 
 <h2>Reproduce / raw material</h2>
 <ul>
-<li>Tracking issue, scripts, raw logs, per-run data: <a href="https://github.com/NikolayS/postgres/issues/48">NikolayS/postgres#48</a></li>
+<li>Tracking issue, scripts, raw per-run series, logs: <a href="https://github.com/NikolayS/postgres/issues/48">NikolayS/postgres#48</a></li>
 <li>The patch under test: <a href="https://github.com/DmitryNFomin/postgres/pull/2">DmitryNFomin/postgres#2</a></li>
 <li>Methodology / design brief: <a href="index.html">index.html</a></li>
 </ul>
 
-<p class="meta">Generated for the Hacking Postgres session of 2026-06-17. Charts: matplotlib; stats: exact
-permutation tests. This is an independent measurement, not a vendor claim — numbers and method are open for scrutiny.</p>
+<p class="meta">Hacking Postgres session, 2026-06-17. Charts: matplotlib. Stats: exact paired (within-round)
+sign-flip permutation tests, Bonferroni-aware. Two independent AI review rounds applied (statistics ·
+PostgreSQL-internals · adversarial-skeptic). Independent measurement, not a vendor claim — numbers and method open for scrutiny.</p>
 
 </div>
 </body>
